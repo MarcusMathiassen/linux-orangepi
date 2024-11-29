@@ -9,6 +9,55 @@
 #define __RK_HDMIRX_H__
 
 #include <linux/bitops.h>
+#include <linux/clk.h>
+#include <linux/cpufreq.h>
+#include <linux/debugfs.h>
+#include <linux/delay.h>
+#include <linux/dma-fence.h>
+#include <linux/dma-mapping.h>
+#include <linux/extcon-provider.h>
+#include <linux/fs.h>
+#include <linux/gpio/consumer.h>
+#include <linux/interrupt.h>
+#include <linux/irq.h>
+#include <linux/math64.h>
+#include <linux/mfd/syscon.h>
+#include <linux/module.h>
+#include <linux/of.h>
+#include <linux/of_platform.h>
+#include <linux/of_reserved_mem.h>
+#include <linux/pinctrl/consumer.h>
+#include <linux/platform_device.h>
+#include <linux/pm_runtime.h>
+#include <linux/regmap.h>
+#include <linux/reset.h>
+#include <linux/rk_hdmirx_config.h>
+#include <linux/rockchip/rockchip_sip.h>
+#include <linux/seq_file.h>
+#include <linux/sync_file.h>
+#include <linux/v4l2-dv-timings.h>
+#include <linux/workqueue.h>
+#include <media/cec.h>
+#include <media/cec-notifier.h>
+#include <media/v4l2-common.h>
+#include <media/v4l2-controls_rockchip.h>
+#include <media/v4l2-ctrls.h>
+#include <media/v4l2-device.h>
+#include <media/v4l2-dv-timings.h>
+#include <media/v4l2-event.h>
+#include <media/v4l2-fh.h>
+#include <media/v4l2-ioctl.h>
+#include <media/videobuf2-dma-contig.h>
+#include <media/videobuf2-v4l2.h>
+#include <soc/rockchip/rockchip-system-status.h>
+#include <sound/hdmi-codec.h>
+#include <linux/rk_hdmirx_class.h>
+#include "rk_hdmirx.h"
+#include "rk_hdmirx_cec.h"
+#include "rk_hdmirx_hdcp.h"
+#include "rk_hdmirx_audio.h"
+
+#define EDID_BLOCK_SIZE			128
 
 #define UPDATE(x, h, l)		(((x) << (l)) & GENMASK((h), (l)))
 #define HIWORD_UPDATE(v, h, l)	(((v) << (l)) | (GENMASK((h), (l)) << 16))
@@ -461,5 +510,198 @@
 #define CEC_INT_STATUS				0x5100
 #define CEC_INT_MASK_N				0x5104
 #define CEC_INT_CLEAR				0x5108
+
+#define INIT_FIFO_STATE			64
+
+enum hdmirx_pix_fmt {
+	HDMIRX_RGB888 = 0,
+	HDMIRX_YUV422 = 1,
+	HDMIRX_YUV444 = 2,
+	HDMIRX_YUV420 = 3,
+};
+
+static const char * const pix_fmt_str[] = {
+	"RGB888",
+	"YUV422",
+	"YUV444",
+	"YUV420",
+};
+
+enum ddr_store_fmt {
+	STORE_RGB888 = 0,
+	STORE_RGBA_ARGB,
+	STORE_YUV420_8BIT,
+	STORE_YUV420_10BIT,
+	STORE_YUV422_8BIT,
+	STORE_YUV422_10BIT,
+	STORE_YUV444_8BIT,
+	STORE_YUV420_16BIT = 8,
+	STORE_YUV422_16BIT = 9,
+};
+
+enum hdmirx_reg_attr {
+	HDMIRX_ATTR_RW = 0,
+	HDMIRX_ATTR_RO = 1,
+	HDMIRX_ATTR_WO = 2,
+	HDMIRX_ATTR_RE = 3,
+};
+
+enum hdmirx_edid_version {
+	HDMIRX_EDID_USER = 0,
+	HDMIRX_EDID_340M = 1,
+	HDMIRX_EDID_600M = 2,
+};
+
+struct hdmirx_reg_table {
+	int reg_base;
+	int reg_end;
+	enum hdmirx_reg_attr attr;
+};
+
+struct hdmirx_fence_context {
+	u64 context;
+	u64 seqno;
+	spinlock_t spinlock;
+};
+
+struct hdmirx_buffer {
+	struct vb2_v4l2_buffer vb;
+	struct list_head queue;
+	union {
+		u32 buff_addr[VIDEO_MAX_PLANES];
+		void *vaddr[VIDEO_MAX_PLANES];
+	};
+};
+
+struct hdmirx_output_fmt {
+	u32 fourcc;
+	u8 cplanes;
+	u8 mplanes;
+	u8 bpp[VIDEO_MAX_PLANES];
+};
+
+struct hdmirx_stream {
+	struct rk_hdmirx_dev *hdmirx_dev;
+	struct video_device vdev;
+	struct vb2_queue buf_queue;
+	struct list_head buf_head;
+	struct hdmirx_buffer *curr_buf;
+	struct hdmirx_buffer *next_buf;
+	struct v4l2_pix_format_mplane pixm;
+	const struct hdmirx_output_fmt *out_fmt;
+	struct mutex vlock;
+	spinlock_t vbq_lock;
+	bool stopping;
+	wait_queue_head_t wq_stopped;
+	u32 frame_idx;
+	u32 line_flag_int_cnt;
+	u32 irq_stat;
+};
+
+struct hdmirx_fence {
+	struct list_head fence_list;
+	struct dma_fence *fence;
+	int fence_fd;
+};
+
+struct hdmirx_audiostate {
+	struct platform_device *pdev;
+	u32 hdmirx_aud_clkrate;
+	u32 fs_audio;
+	u32 ch_audio;
+	u32 ctsn_flag;
+	u32 fifo_flag;
+	int init_state;
+	int pre_state;
+	bool fifo_int;
+	bool audio_enabled;
+};
+
+struct rk_hdmirx_dev {
+	struct cec_notifier *cec_notifier;
+	struct cpufreq_policy *policy;
+	struct device *dev;
+	struct device *classdev;
+	struct device *codec_dev;
+	struct device_node *of_node;
+	struct hdmirx_stream stream;
+	struct v4l2_device v4l2_dev;
+	struct v4l2_ctrl_handler hdl;
+	struct v4l2_ctrl *detect_tx_5v_ctrl;
+	struct v4l2_ctrl *audio_sampling_rate_ctrl;
+	struct v4l2_ctrl *audio_present_ctrl;
+	struct v4l2_dv_timings timings;
+	struct gpio_desc *hdmirx_det_gpio;
+	struct work_struct work_wdt_config;
+	struct delayed_work delayed_work_hotplug;
+	struct delayed_work delayed_work_res_change;
+	struct delayed_work delayed_work_audio;
+	struct delayed_work delayed_work_heartbeat;
+	struct delayed_work delayed_work_cec;
+	struct dentry *debugfs_dir;
+	struct freq_qos_request min_sta_freq_req;
+	struct hdmirx_audiostate audio_state;
+	struct extcon_dev *extcon;
+	struct hdmirx_cec *cec;
+	struct hdmirx_fence_context fence_ctx;
+	struct mutex stream_lock;
+	struct mutex work_lock;
+	struct pm_qos_request pm_qos;
+	struct reset_control *rst_a;
+	struct reset_control *rst_p;
+	struct reset_control *rst_ref;
+	struct reset_control *rst_biu;
+	struct clk_bulk_data *clks;
+	struct regmap *grf;
+	struct regmap *vo1_grf;
+	struct rk_hdmirx_hdcp *hdcp;
+	struct hdmirx_fence *hdmirx_fence;
+	struct list_head qbuf_fence_list_head;
+	struct list_head done_fence_list_head;
+	void __iomem *regs;
+	int edid_version;
+	int audio_present;
+	int hdmi_irq;
+	int dma_irq;
+	int det_irq;
+	enum hdmirx_pix_fmt pix_fmt;
+	bool avi_pkt_rcv;
+	bool cr_write_done;
+	bool cr_read_done;
+	bool timer_base_lock;
+	bool tmds_clk_ratio;
+	bool is_dvi_mode;
+	bool power_on;
+	bool initialized;
+	bool freq_qos_add;
+	bool get_timing;
+	bool cec_enable;
+	bool hpd_on;
+	bool force_off;
+	u8 hdcp_enable;
+	u32 num_clks;
+	u32 edid_blocks_written;
+	u32 hpd_trigger_level;
+	u32 cur_vic;
+	u32 cur_fmt_fourcc;
+	u32 cur_color_range;
+	u32 cur_color_space;
+	u32 color_depth;
+	u32 cpu_freq_khz;
+	u32 bound_cpu;
+	u32 phy_cpuid;
+	u32 fps;
+	u32 wdt_cfg_bound_cpu;
+	u8 edid[EDID_BLOCK_SIZE * 2];
+	hdmi_codec_plugged_cb plugged_cb;
+	spinlock_t rst_lock;
+	spinlock_t fence_lock;
+};
+
+void hdmirx_writel(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 val);
+u32 hdmirx_readl(struct rk_hdmirx_dev *hdmirx_dev, int reg);
+void hdmirx_clear_interrupt(struct rk_hdmirx_dev *hdmirx_dev, u32 reg, u32 val);
+void hdmirx_update_bits(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 mask, u32 data);
+bool tx_5v_power_present(struct rk_hdmirx_dev *hdmirx_dev);
 
 #endif

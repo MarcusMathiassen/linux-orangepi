@@ -48,9 +48,11 @@
 #include <soc/rockchip/rockchip-system-status.h>
 #include <sound/hdmi-codec.h>
 #include <linux/rk_hdmirx_class.h>
+
 #include "rk_hdmirx.h"
 #include "rk_hdmirx_cec.h"
 #include "rk_hdmirx_hdcp.h"
+#include "rk_hdmirx_audio.h"
 
 static int debug;
 module_param(debug, int, 0644);
@@ -60,20 +62,18 @@ static bool low_latency;
 module_param(low_latency, bool, 0644);
 MODULE_PARM_DESC(low_latency, "low_latency en(0-1)");
 
-#define	RK_HDMIRX_DRVNAME		"rk_hdmirx"
+#define	RK_HDMIRX_DRVNAME		"mota_hdmi_rx"
 #define EDID_NUM_BLOCKS_MAX		2
 #define EDID_BLOCK_SIZE			128
 #define HDMIRX_DEFAULT_TIMING		V4L2_DV_BT_CEA_640X480P59_94
-#define HDMIRX_VDEV_NAME		"stream_hdmirx"
+#define HDMIRX_VDEV_NAME		"mota_hdmi_rx"
 #define HDMIRX_REQ_BUFS_MIN		2
 #define HDMIRX_STORED_BIT_WIDTH		8
 #define IREF_CLK_FREQ_HZ		428571429
 #define MEMORY_ALIGN_ROUND_UP_BYTES	64
 #define HDMIRX_PLANE_Y			0
 #define HDMIRX_PLANE_CBCR		1
-#define INIT_FIFO_STATE			64
 #define RK_IRQ_HDMIRX_HDMI		210
-#define FILTER_FRAME_CNT		6
 #define CPU_LIMIT_FREQ_KHZ		1200000
 #define WAIT_PHY_REG_TIME		50
 #define WAIT_TIMER_LOCK_TIME		50
@@ -82,215 +82,15 @@ MODULE_PARM_DESC(low_latency, "low_latency en(0-1)");
 #define WAIT_LOCK_STABLE_TIME		20
 #define WAIT_AVI_PKT_TIME		300
 
-#define is_validfs(x) (x == 32000 || \
-			x == 44100 || \
-			x == 48000 || \
-			x == 88200 || \
-			x == 96000 || \
-			x == 176400 || \
-			x == 192000 || \
-			x == 768000)
-
-struct hdmirx_audiostate {
-	struct platform_device *pdev;
-	u32 hdmirx_aud_clkrate;
-	u32 fs_audio;
-	u32 ch_audio;
-	u32 ctsn_flag;
-	u32 fifo_flag;
-	int init_state;
-	int pre_state;
-	bool fifo_int;
-	bool audio_enabled;
-};
-
-enum hdmirx_pix_fmt {
-	HDMIRX_RGB888 = 0,
-	HDMIRX_YUV422 = 1,
-	HDMIRX_YUV444 = 2,
-	HDMIRX_YUV420 = 3,
-};
-
-static const char * const pix_fmt_str[] = {
-	"RGB888",
-	"YUV422",
-	"YUV444",
-	"YUV420",
-};
-
-enum ddr_store_fmt {
-	STORE_RGB888 = 0,
-	STORE_RGBA_ARGB,
-	STORE_YUV420_8BIT,
-	STORE_YUV420_10BIT,
-	STORE_YUV422_8BIT,
-	STORE_YUV422_10BIT,
-	STORE_YUV444_8BIT,
-	STORE_YUV420_16BIT = 8,
-	STORE_YUV422_16BIT = 9,
-};
-
-enum hdmirx_reg_attr {
-	HDMIRX_ATTR_RW = 0,
-	HDMIRX_ATTR_RO = 1,
-	HDMIRX_ATTR_WO = 2,
-	HDMIRX_ATTR_RE = 3,
-};
-
-enum hdmirx_edid_version {
-	HDMIRX_EDID_USER = 0,
-	HDMIRX_EDID_340M = 1,
-	HDMIRX_EDID_600M = 2,
-};
-
-struct hdmirx_reg_table {
-	int reg_base;
-	int reg_end;
-	enum hdmirx_reg_attr attr;
-};
-
-struct hdmirx_fence_context {
-	u64 context;
-	u64 seqno;
-	spinlock_t spinlock;
-};
-
-struct hdmirx_buffer {
-	struct vb2_v4l2_buffer vb;
-	struct list_head queue;
-	union {
-		u32 buff_addr[VIDEO_MAX_PLANES];
-		void *vaddr[VIDEO_MAX_PLANES];
-	};
-};
-
-struct hdmirx_output_fmt {
-	u32 fourcc;
-	u8 cplanes;
-	u8 mplanes;
-	u8 bpp[VIDEO_MAX_PLANES];
-};
-
-struct hdmirx_stream {
-	struct rk_hdmirx_dev *hdmirx_dev;
-	struct video_device vdev;
-	struct vb2_queue buf_queue;
-	struct list_head buf_head;
-	struct hdmirx_buffer *curr_buf;
-	struct hdmirx_buffer *next_buf;
-	struct v4l2_pix_format_mplane pixm;
-	const struct hdmirx_output_fmt *out_fmt;
-	struct mutex vlock;
-	spinlock_t vbq_lock;
-	bool stopping;
-	wait_queue_head_t wq_stopped;
-	u32 frame_idx;
-	u32 line_flag_int_cnt;
-	u32 irq_stat;
-};
-
-struct hdmirx_fence {
-	struct list_head fence_list;
-	struct dma_fence *fence;
-	int fence_fd;
-};
-
-struct rk_hdmirx_dev {
-	struct cec_notifier *cec_notifier;
-	struct cpufreq_policy *policy;
-	struct device *dev;
-	struct device *classdev;
-	struct device *codec_dev;
-	struct device_node *of_node;
-	struct hdmirx_stream stream;
-	struct v4l2_device v4l2_dev;
-	struct v4l2_ctrl_handler hdl;
-	struct v4l2_ctrl *detect_tx_5v_ctrl;
-	struct v4l2_ctrl *audio_sampling_rate_ctrl;
-	struct v4l2_ctrl *audio_present_ctrl;
-	struct v4l2_dv_timings timings;
-	struct gpio_desc *hdmirx_det_gpio;
-	struct work_struct work_wdt_config;
-	struct delayed_work delayed_work_hotplug;
-	struct delayed_work delayed_work_res_change;
-	struct delayed_work delayed_work_audio;
-	struct delayed_work delayed_work_heartbeat;
-	struct delayed_work delayed_work_cec;
-	struct dentry *debugfs_dir;
-	struct freq_qos_request min_sta_freq_req;
-	struct hdmirx_audiostate audio_state;
-	struct extcon_dev *extcon;
-	struct hdmirx_cec *cec;
-	struct hdmirx_fence_context fence_ctx;
-	struct mutex stream_lock;
-	struct mutex work_lock;
-	struct pm_qos_request pm_qos;
-	struct reset_control *rst_a;
-	struct reset_control *rst_p;
-	struct reset_control *rst_ref;
-	struct reset_control *rst_biu;
-	struct clk_bulk_data *clks;
-	struct regmap *grf;
-	struct regmap *vo1_grf;
-	struct rk_hdmirx_hdcp *hdcp;
-	struct hdmirx_fence *hdmirx_fence;
-	struct list_head qbuf_fence_list_head;
-	struct list_head done_fence_list_head;
-	void __iomem *regs;
-	int edid_version;
-	int audio_present;
-	int hdmi_irq;
-	int dma_irq;
-	int det_irq;
-	enum hdmirx_pix_fmt pix_fmt;
-	bool avi_pkt_rcv;
-	bool cr_write_done;
-	bool cr_read_done;
-	bool timer_base_lock;
-	bool tmds_clk_ratio;
-	bool is_dvi_mode;
-	bool power_on;
-	bool initialized;
-	bool freq_qos_add;
-	bool get_timing;
-	bool cec_enable;
-	bool hpd_on;
-	bool force_off;
-	u8 hdcp_enable;
-	u32 num_clks;
-	u32 edid_blocks_written;
-	u32 hpd_trigger_level;
-	u32 cur_vic;
-	u32 cur_fmt_fourcc;
-	u32 cur_color_range;
-	u32 cur_color_space;
-	u32 color_depth;
-	u32 cpu_freq_khz;
-	u32 bound_cpu;
-	u32 phy_cpuid;
-	u32 fps;
-	u32 wdt_cfg_bound_cpu;
-	u8 edid[EDID_BLOCK_SIZE * 2];
-	hdmi_codec_plugged_cb plugged_cb;
-	spinlock_t rst_lock;
-	spinlock_t fence_lock;
-};
+#define DMA_CONFIG_4_BITS (LINE_FLAG_INT_EN | HDMIRX_DMA_IDLE_INT | HDMIRX_LOCK_DISABLE_INT | LAST_FRAME_AXI_UNFINISH_INT_EN | FIFO_OVERFLOW_INT_EN | FIFO_UNDERFLOW_INT_EN | HDMIRX_AXI_ERROR_INT_EN)
 
 static const unsigned int hdmirx_extcon_cable[] = {
 	EXTCON_JACK_VIDEO_IN,
 	EXTCON_NONE,
 };
 
-static bool tx_5v_power_present(struct rk_hdmirx_dev *hdmirx_dev);
 static void hdmirx_set_fmt(struct hdmirx_stream *stream,
 		struct v4l2_pix_format_mplane *pixm, bool try);
-static void hdmirx_audio_set_state(struct rk_hdmirx_dev *hdmirx_dev, enum audio_stat stat);
-static void hdmirx_audio_setup(struct rk_hdmirx_dev *hdmirx_dev);
-static u32 hdmirx_audio_fs(struct rk_hdmirx_dev *hdmirx_dev);
-static u32 hdmirx_audio_ch(struct rk_hdmirx_dev *hdmirx_dev);
-static void hdmirx_audio_fifo_init(struct rk_hdmirx_dev *hdmirx_dev);
-static void hdmirx_audio_handle_plugged_change(struct rk_hdmirx_dev *hdmirx_dev, bool plugged);
-static void hdmirx_audio_interrupts_setup(struct rk_hdmirx_dev *hdmirx_dev, bool en);
 static int hdmirx_set_cpu_limit_freq(struct rk_hdmirx_dev *hdmirx_dev);
 static void hdmirx_cancel_cpu_limit_freq(struct rk_hdmirx_dev *hdmirx_dev);
 static void hdmirx_plugout(struct rk_hdmirx_dev *hdmirx_dev);
@@ -416,7 +216,7 @@ static inline struct hdmirx_buffer *to_hdmirx_buffer(struct vb2_v4l2_buffer *vb)
 	return container_of(vb, struct hdmirx_buffer, vb);
 }
 
-static void hdmirx_writel(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 val)
+void hdmirx_writel(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 val)
 {
 	unsigned long lock_flags = 0;
 
@@ -425,7 +225,7 @@ static void hdmirx_writel(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 val)
 	spin_unlock_irqrestore(&hdmirx_dev->rst_lock, lock_flags);
 }
 
-static u32 hdmirx_readl(struct rk_hdmirx_dev *hdmirx_dev, int reg)
+u32 hdmirx_readl(struct rk_hdmirx_dev *hdmirx_dev, int reg)
 {
 	unsigned long lock_flags = 0;
 	u32 val;
@@ -520,8 +320,7 @@ static void hdmirx_reset_all(struct rk_hdmirx_dev *hdmirx_dev)
 	spin_unlock_irqrestore(&hdmirx_dev->rst_lock, lock_flags);
 }
 
-static void hdmirx_update_bits(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 mask,
-		u32 data)
+void hdmirx_update_bits(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 mask, u32 data)
 {
 	unsigned long lock_flags = 0;
 	u32 val;
@@ -536,16 +335,15 @@ static void hdmirx_update_bits(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 ma
 /*
  * Before clearing interrupt need to read the interrupt status.
  */
-static inline void hdmirx_clear_interrupt(struct rk_hdmirx_dev *hdmirx_dev,
-					  u32 reg, u32 val)
+void hdmirx_clear_interrupt(struct rk_hdmirx_dev *hdmirx_dev, u32 reg, u32 val)
 {
 	/* (interrupt status register) = (interrupt clear register) - 0x8 */
 	hdmirx_readl(hdmirx_dev, reg - 0x8);
 	hdmirx_writel(hdmirx_dev, reg, val);
 }
 
-static int hdmirx_subscribe_event(struct v4l2_fh *fh,
-			const struct v4l2_event_subscription *sub)
+static int
+hdmirx_subscribe_event(struct v4l2_fh *fh, const struct v4l2_event_subscription *sub)
 {
 	switch (sub->type) {
 	case V4L2_EVENT_SOURCE_CHANGE:
@@ -557,9 +355,8 @@ static int hdmirx_subscribe_event(struct v4l2_fh *fh,
 	case RK_HDMIRX_V4L2_EVENT_SIGNAL_LOST:
 	case RK_HDMIRX_V4L2_EVENT_AUDIOINFO:
 		return v4l2_event_subscribe(fh, sub, 0, NULL);
-
 	default:
-		return v4l2_ctrl_subscribe_event(fh, sub);
+		break;
 	}
 
 	return -EINVAL;
@@ -586,7 +383,7 @@ static bool signal_not_lock(struct rk_hdmirx_dev *hdmirx_dev)
 	return true;
 }
 
-static bool tx_5v_power_present(struct rk_hdmirx_dev *hdmirx_dev)
+bool tx_5v_power_present(struct rk_hdmirx_dev *hdmirx_dev)
 {
 	bool ret;
 	int val, i, cnt;
@@ -1182,6 +979,14 @@ static int hdmirx_write_edid(struct rk_hdmirx_dev *hdmirx_dev,
 
 	hdmirx_dev->edid_blocks_written = edid->blocks;
 	memcpy(&hdmirx_dev->edid, edid->edid, edid->blocks * EDID_BLOCK_SIZE);
+
+	/*
+		After updating the EDID there has to be a 100ms delay before pulling
+		the HPD high as per the HDMI spec.
+		https://arc.net/l/quote/crszsgia
+	*/
+	msleep(100);
+
 	if (hpd_up) {
 		if (tx_5v_power_present(hdmirx_dev))
 			hdmirx_hpd_ctrl(hdmirx_dev, true);
@@ -1995,10 +1800,11 @@ static int hdmirx_queue_setup(struct vb2_queue *queue,
 	pixm = &stream->pixm;
 	out_fmt = stream->out_fmt;
 
-	if ((num_planes == NULL) || (out_fmt == NULL)) {
+	if (!out_fmt) {
 		v4l2_err(v4l2_dev, "%s: out_fmt null pointer err!\n", __func__);
 		return -EINVAL;
 	}
+
 	*num_planes = out_fmt->mplanes;
 	height = pixm->height;
 
@@ -2233,6 +2039,8 @@ static int hdmirx_start_streaming(struct vb2_queue *queue, unsigned int count)
 	int delay_line;
 	uint32_t touch_flag;
 
+	pr_info("[HDMI RX____] hdmirx_start_streaming wefpjwefij woeifj iowejf\n");
+
 	if (!hdmirx_dev->get_timing) {
 		v4l2_err(v4l2_dev, "Err, timing is invalid\n");
 		return 0;
@@ -2240,6 +2048,12 @@ static int hdmirx_start_streaming(struct vb2_queue *queue, unsigned int count)
 
 	if (signal_not_lock(hdmirx_dev)) {
 		v4l2_err(v4l2_dev, "%s: signal is not locked, retry!\n", __func__);
+		process_signal_change(hdmirx_dev);
+		return 0;
+	}
+
+	if (!bt->height) {
+		v4l2_err(v4l2_dev, "height err: %d\n", bt->height);
 		process_signal_change(hdmirx_dev);
 		return 0;
 	}
@@ -2271,52 +2085,20 @@ static int hdmirx_start_streaming(struct vb2_queue *queue, unsigned int count)
 		return -ENOMEM;
 	}
 
-	v4l2_dbg(2, debug, v4l2_dev,
-			"%s: start_stream cur_buf y_addr:%#x, uv_addr:%#x\n",
-			__func__, stream->curr_buf->buff_addr[HDMIRX_PLANE_Y],
-			stream->curr_buf->buff_addr[HDMIRX_PLANE_CBCR]);
-	hdmirx_writel(hdmirx_dev, DMA_CONFIG2,
-			stream->curr_buf->buff_addr[HDMIRX_PLANE_Y]);
-	hdmirx_writel(hdmirx_dev, DMA_CONFIG3,
-			stream->curr_buf->buff_addr[HDMIRX_PLANE_CBCR]);
+	v4l2_dbg(2, debug, v4l2_dev, "%s: start_stream cur_buf y_addr:%#x, uv_addr:%#x\n", __func__, stream->curr_buf->buff_addr[HDMIRX_PLANE_Y], stream->curr_buf->buff_addr[HDMIRX_PLANE_CBCR]);
+	hdmirx_writel(hdmirx_dev, DMA_CONFIG2, stream->curr_buf->buff_addr[HDMIRX_PLANE_Y]);
+	hdmirx_writel(hdmirx_dev, DMA_CONFIG3, stream->curr_buf->buff_addr[HDMIRX_PLANE_CBCR]);
 
-	if (bt->height) {
-		if (bt->interlaced == V4L2_DV_INTERLACED)
-			line_flag = bt->height / 2;
-		else
-			line_flag = bt->height;
+	line_flag = (bt->interlaced == V4L2_DV_INTERLACED) ? bt->height / 2 : bt->height;
+	delay_line = (low_latency && hdmirx_dev->fps >= 59) ? 10 : bt->height >> 3; //line_flag * 2 / 3;
 
-		if (low_latency && hdmirx_dev->fps >= 59)
-			delay_line = 10;
-		else
-			delay_line = line_flag * 2 / 3;
-
-		v4l2_info(v4l2_dev, "%s: delay_line:%d\n", __func__, delay_line);
-		hdmirx_update_bits(hdmirx_dev, DMA_CONFIG7,
-				LINE_FLAG_NUM_MASK,
-				LINE_FLAG_NUM(delay_line));
-	} else {
-		v4l2_err(v4l2_dev, "height err: %d\n", bt->height);
-	}
+	v4l2_info(v4l2_dev, "%s: delay_line:%d\n", __func__, delay_line);
+	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG7, LINE_FLAG_NUM_MASK, LINE_FLAG_NUM(delay_line));
 
 	sip_hdmirx_config(HDMIRX_INFO_NOTIFY, 0, DMA_CONFIG6, HDMIRX_DMA_EN);
 	hdmirx_writel(hdmirx_dev, DMA_CONFIG5, 0xffffffff);
 	hdmirx_writel(hdmirx_dev, CED_DYN_CONTROL, 0x1);
-	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG4,
-			LINE_FLAG_INT_EN |
-			HDMIRX_DMA_IDLE_INT |
-			HDMIRX_LOCK_DISABLE_INT |
-			LAST_FRAME_AXI_UNFINISH_INT_EN |
-			FIFO_OVERFLOW_INT_EN |
-			FIFO_UNDERFLOW_INT_EN |
-			HDMIRX_AXI_ERROR_INT_EN,
-			LINE_FLAG_INT_EN |
-			HDMIRX_DMA_IDLE_INT |
-			HDMIRX_LOCK_DISABLE_INT |
-			LAST_FRAME_AXI_UNFINISH_INT_EN |
-			FIFO_OVERFLOW_INT_EN |
-			FIFO_UNDERFLOW_INT_EN |
-			HDMIRX_AXI_ERROR_INT_EN);
+	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG4, DMA_CONFIG_4_BITS, DMA_CONFIG_4_BITS);
 	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG6, HDMIRX_DMA_EN, HDMIRX_DMA_EN);
 	v4l2_dbg(1, debug, v4l2_dev, "%s: enable dma", __func__);
 	mutex_unlock(&hdmirx_dev->stream_lock);
@@ -2495,9 +2277,9 @@ static int hdmirx_init_vb2_queue(struct vb2_queue *q,
 	q->timestamp_flags = V4L2_BUF_FLAG_TIMESTAMP_MONOTONIC;
 	q->lock = &stream->vlock;
 	q->dev = hdmirx_dev->dev;
-	q->allow_cache_hints = 1;
-	q->bidirectional = 1;
-	q->dma_attrs = DMA_ATTR_FORCE_CONTIGUOUS;
+	// q->allow_cache_hints = 1;
+	// q->bidirectional = 1;
+	// q->dma_attrs = DMA_ATTR_FORCE_CONTIGUOUS;
 	q->gfp_flags = GFP_DMA32;
 	return vb2_queue_init(q);
 }
@@ -2540,7 +2322,6 @@ static const struct v4l2_file_operations hdmirx_fops = {
 	.open = v4l2_fh_open,
 	.release = vb2_fop_release,
 	.unlocked_ioctl = video_ioctl2,
-	.read = vb2_fop_read,
 	.poll = vb2_fop_poll,
 	.mmap = vb2_fop_mmap,
 };
@@ -2568,13 +2349,11 @@ static int hdmirx_register_stream_vdev(struct hdmirx_stream *stream)
 	vdev->minor = -1;
 	vdev->v4l2_dev = v4l2_dev;
 	vdev->lock = &stream->vlock;
-	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE |
-			    V4L2_CAP_STREAMING;
+	vdev->device_caps = V4L2_CAP_VIDEO_CAPTURE_MPLANE | V4L2_CAP_STREAMING;
 	video_set_drvdata(vdev, stream);
 	vdev->vfl_dir = VFL_DIR_RX;
 
-	hdmirx_init_vb2_queue(&stream->buf_queue, stream,
-			     V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
+	hdmirx_init_vb2_queue(&stream->buf_queue, stream, V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE);
 	vdev->queue = &stream->buf_queue;
 
 	ret = video_register_device(vdev, VFL_TYPE_VIDEO, -1);
@@ -2585,15 +2364,6 @@ static int hdmirx_register_stream_vdev(struct hdmirx_stream *stream)
 	}
 
 	return 0;
-}
-
-static void process_audio_change(struct rk_hdmirx_dev *hdmirx_dev)
-{
-	struct hdmirx_stream *stream = &hdmirx_dev->stream;
-	const struct v4l2_event evt_audio_info = {
-		.type = RK_HDMIRX_V4L2_EVENT_AUDIOINFO,
-	};
-	v4l2_event_queue(&stream->vdev, &evt_audio_info);
 }
 
 static void process_signal_change(struct rk_hdmirx_dev *hdmirx_dev)
@@ -2869,10 +2639,8 @@ static void hdmirx_vb_done(struct hdmirx_stream *stream,
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
 
 	/* Dequeue a filled buffer */
-	for (i = 0; i < fmt->mplanes; i++) {
-		vb2_set_plane_payload(&vb_done->vb2_buf, i,
-				      stream->pixm.plane_fmt[i].sizeimage);
-	}
+	for (i = 0; i < fmt->mplanes; ++i)
+		vb2_set_plane_payload(&vb_done->vb2_buf, i, stream->pixm.plane_fmt[i].sizeimage);
 
 	vb_done->vb2_buf.timestamp = ktime_get_ns();
 	vb2_buffer_done(&vb_done->vb2_buf, VB2_BUF_STATE_DONE);
@@ -2889,56 +2657,25 @@ static void dma_idle_int_handler(struct rk_hdmirx_dev *hdmirx_dev, bool *handled
 	struct vb2_v4l2_buffer *vb_done = NULL;
 
 	if (!(stream->irq_stat) && !(stream->irq_stat & LINE_FLAG_INT_EN))
-		v4l2_dbg(1, debug, v4l2_dev,
-			 "%s: last time have no line_flag_irq\n", __func__);
+		v4l2_dbg(1, debug, v4l2_dev, "%s: last time have no line_flag_irq\n", __func__);
 
-	if (low_latency) {
-		spin_lock_irqsave(&hdmirx_dev->fence_lock, lock_flags);
-		if (hdmirx_dev->hdmirx_fence) {
-			dma_fence_signal(hdmirx_dev->hdmirx_fence->fence);
-			dma_fence_put(hdmirx_dev->hdmirx_fence->fence);
-			v4l2_dbg(3, debug, v4l2_dev, "%s: signal fence:%p, old_fd:%d\n",
-				 __func__,
-				 hdmirx_dev->hdmirx_fence->fence,
-				 hdmirx_dev->hdmirx_fence->fence_fd);
-			kfree(hdmirx_dev->hdmirx_fence);
-			hdmirx_dev->hdmirx_fence = NULL;
-		}
-		spin_unlock_irqrestore(&hdmirx_dev->fence_lock, lock_flags);
+	if (!stream->next_buf) {
+		v4l2_info(v4l2_dev, "%s: dma idle with no next_buf\n", __func__);
 		goto DMA_IDLE_OUT;
 	}
 
-	if (stream->line_flag_int_cnt <= FILTER_FRAME_CNT)
-		goto DMA_IDLE_OUT;
-
-	if ((bt->interlaced != V4L2_DV_INTERLACED) ||
-			(stream->line_flag_int_cnt % 2 == 0)) {
-		if (stream->next_buf) {
-			if (stream->curr_buf)
-				vb_done = &stream->curr_buf->vb;
-
-			if (vb_done) {
-				vb_done->vb2_buf.timestamp = ktime_get_ns();
-				vb_done->sequence = stream->frame_idx;
-				/* config userbits 0 or 0xffffffff as invalid fence_fd*/
-				memset(vb_done->timecode.userbits, 0xff,
-				       sizeof(vb_done->timecode.userbits));
-				hdmirx_vb_done(stream, vb_done);
-				stream->frame_idx++;
-				if (stream->frame_idx == 30)
-					v4l2_info(v4l2_dev, "rcv frames\n");
-			}
-
-			stream->curr_buf = NULL;
-			if (stream->next_buf) {
-				stream->curr_buf = stream->next_buf;
-				stream->next_buf = NULL;
-			}
-		} else {
-			v4l2_dbg(3, debug, v4l2_dev,
-				 "%s: next_buf NULL, skip vb_done!\n", __func__);
-		}
+	vb_done = &stream->curr_buf->vb;
+	if (vb_done) {
+		vb_done->vb2_buf.timestamp = ktime_get_ns();
+		vb_done->sequence = stream->frame_idx;
+		/* config userbits 0 or 0xffffffff as invalid fence_fd*/
+		memset(vb_done->timecode.userbits, 0xff, sizeof(vb_done->timecode.userbits));
+		hdmirx_vb_done(stream, vb_done);
+		stream->frame_idx++;
 	}
+
+	stream->curr_buf = stream->next_buf;
+	stream->next_buf = NULL;
 
 DMA_IDLE_OUT:
 	*handled = true;
@@ -2991,86 +2728,82 @@ static void line_flag_int_handler(struct rk_hdmirx_dev *hdmirx_dev, bool *handle
 
 	stream->line_flag_int_cnt++;
 	if (!(stream->irq_stat) && !(stream->irq_stat & HDMIRX_DMA_IDLE_INT))
-		v4l2_dbg(1, debug, v4l2_dev,
-			 "%s: last have no dma_idle_irq\n", __func__);
+		v4l2_info(v4l2_dev, "%s: last have no dma_idle_irq\n", __func__);
+
 	dma_cfg6 = hdmirx_readl(hdmirx_dev, DMA_CONFIG6);
+
 	if (!(dma_cfg6 & HDMIRX_DMA_EN)) {
 		v4l2_dbg(2, debug, v4l2_dev, "%s: dma not on\n", __func__);
 		goto LINE_FLAG_OUT;
 	}
 
-	if (stream->line_flag_int_cnt <= FILTER_FRAME_CNT)
-		goto LINE_FLAG_OUT;
+	spin_lock_irqsave(&hdmirx_dev->fence_lock, lock_flags);
 
-	if ((bt->interlaced != V4L2_DV_INTERLACED) ||
-			(stream->line_flag_int_cnt % 2 == 0)) {
-		spin_lock_irqsave(&hdmirx_dev->fence_lock, lock_flags);
-		if (hdmirx_dev->hdmirx_fence) {
-			dma_fence_signal(hdmirx_dev->hdmirx_fence->fence);
-			dma_fence_put(hdmirx_dev->hdmirx_fence->fence);
-			v4l2_dbg(2, debug, v4l2_dev, "%s: signal last fence:%p, old_fd:%d\n",
-				 __func__,
-				 hdmirx_dev->hdmirx_fence->fence,
-				 hdmirx_dev->hdmirx_fence->fence_fd);
-			kfree(hdmirx_dev->hdmirx_fence);
-			hdmirx_dev->hdmirx_fence = NULL;
-		}
-		spin_unlock_irqrestore(&hdmirx_dev->fence_lock, lock_flags);
-
-		if (!stream->next_buf) {
-			spin_lock(&stream->vbq_lock);
-			if (!list_empty(&stream->buf_head)) {
-				stream->next_buf = list_first_entry(&stream->buf_head,
-						struct hdmirx_buffer, queue);
-				list_del(&stream->next_buf->queue);
-			} else {
-				stream->next_buf = NULL;
-			}
-			spin_unlock(&stream->vbq_lock);
-
-		}
-
-		if (stream->next_buf) {
-			hdmirx_writel(hdmirx_dev, DMA_CONFIG2,
-				stream->next_buf->buff_addr[HDMIRX_PLANE_Y]);
-			hdmirx_writel(hdmirx_dev, DMA_CONFIG3,
-				stream->next_buf->buff_addr[HDMIRX_PLANE_CBCR]);
-
-			if (low_latency) {
-				if (stream->curr_buf)
-					vb_done = &stream->curr_buf->vb;
-
-				if (vb_done) {
-					hdmirx_add_fence_to_vb_done(stream, vb_done);
-					vb_done->vb2_buf.timestamp = ktime_get_ns();
-					vb_done->sequence = stream->frame_idx;
-					hdmirx_vb_done(stream, vb_done);
-					stream->frame_idx++;
-					if (stream->frame_idx == 30)
-						v4l2_info(v4l2_dev, "rcv frames\n");
-				}
-
-				stream->curr_buf = stream->next_buf;
-				stream->next_buf = NULL;
-			}
-		} else {
-			v4l2_dbg(3, debug, v4l2_dev,
-				 "%s: next_buf NULL, drop the frame!\n", __func__);
-		}
-
-		if (stream->curr_buf) {
-			v4l2_dbg(4, debug, v4l2_dev, "%s: curr_fd:%d\n",
-				 __func__, stream->curr_buf->vb.vb2_buf.planes[0].m.fd);
-		}
-
-		if (stream->next_buf) {
-			v4l2_dbg(4, debug, v4l2_dev, "%s: next_fd:%d\n",
-				 __func__, stream->next_buf->vb.vb2_buf.planes[0].m.fd);
-		}
-	} else {
-		v4l2_dbg(3, debug, v4l2_dev, "%s: interlace:%d, line_flag_int_cnt:%d\n",
-			 __func__, bt->interlaced, stream->line_flag_int_cnt);
+	if (hdmirx_dev->hdmirx_fence) {
+		dma_fence_signal(hdmirx_dev->hdmirx_fence->fence);
+		dma_fence_put(hdmirx_dev->hdmirx_fence->fence);
+		v4l2_dbg(2, debug, v4l2_dev, "%s: signal last fence:%p, old_fd:%d\n", __func__, hdmirx_dev->hdmirx_fence->fence, hdmirx_dev->hdmirx_fence->fence_fd);
+		kfree(hdmirx_dev->hdmirx_fence);
+		hdmirx_dev->hdmirx_fence = NULL;
 	}
+
+	spin_unlock_irqrestore(&hdmirx_dev->fence_lock, lock_flags);
+
+	// Don't have a next_buf? Try get one
+	if (!stream->next_buf) {
+		spin_lock(&stream->vbq_lock);
+		if (!list_empty(&stream->buf_head)) {
+			stream->next_buf = list_first_entry(&stream->buf_head, struct hdmirx_buffer, queue);
+			list_del(&stream->next_buf->queue);
+		} else {
+			stream->next_buf = NULL;
+		}
+		spin_unlock(&stream->vbq_lock);
+	}
+
+	// Still don't have one? We'll drop the frame. Try again next time.
+	if (!stream->next_buf) {
+		v4l2_info(v4l2_dev, "%s: next_buf NULL, drop the frame!\n", __func__);
+		goto LINE_FLAG_OUT;
+	}
+
+	hdmirx_writel(hdmirx_dev, DMA_CONFIG2, stream->next_buf->buff_addr[HDMIRX_PLANE_Y]);
+	hdmirx_writel(hdmirx_dev, DMA_CONFIG3, stream->next_buf->buff_addr[HDMIRX_PLANE_CBCR]);
+
+	// if (stream->line_flag_int_cnt % 2 == 0) {
+	// 	if (!stream->curr_buf)
+	// 		goto LINE_FLAG_OUT;
+	// 	vb_done = &stream->curr_buf->vb;
+	// 	vb_done->vb2_buf.timestamp = ktime_get_ns();
+	// 	vb_done->sequence = stream->frame_idx;
+	// 	/* config userbits 0 or 0xffffffff as invalid fence_fd*/
+	// 	memset(vb_done->timecode.userbits, 0xff, sizeof(vb_done->timecode.userbits));
+	// 	hdmirx_vb_done(stream, vb_done);
+	// 	stream->frame_idx++;
+	// 	if (stream->frame_idx == 30)
+	// 		v4l2_info(v4l2_dev, "rcv frames\n");
+	// }
+
+	// if (low_latency) {
+	// 	if (stream->curr_buf)
+	// 		vb_done = &stream->curr_buf->vb;
+
+	// 	if (vb_done) {
+	// 		hdmirx_add_fence_to_vb_done(stream, vb_done);
+	// 		vb_done->vb2_buf.timestamp = ktime_get_ns();
+	// 		vb_done->sequence = stream->frame_idx;
+	// 		hdmirx_vb_done(stream, vb_done);
+	// 		stream->frame_idx++;
+	// 		if (stream->frame_idx == 30)
+	// 			v4l2_info(v4l2_dev, "rcv frames\n");
+	// 	}
+
+	// 	stream->curr_buf = stream->next_buf;
+	// 	stream->next_buf = NULL;
+	// }
+
+	if (stream->curr_buf) v4l2_dbg(4, debug, v4l2_dev, "%s: curr_fd:%d\n", __func__, stream->curr_buf->vb.vb2_buf.planes[0].m.fd);
+	if (stream->next_buf) v4l2_dbg(4, debug, v4l2_dev, "%s: next_fd:%d\n", __func__, stream->next_buf->vb.vb2_buf.planes[0].m.fd);
 
 LINE_FLAG_OUT:
 	*handled = true;
@@ -3094,14 +2827,7 @@ static irqreturn_t hdmirx_dma_irq_handler(int irq, void *dev_id)
 			v4l2_dbg(1, debug, v4l2_dev, "%s: stop stream!\n", __func__);
 			stream->stopping = false;
 			hdmirx_writel(hdmirx_dev, DMA_CONFIG5, 0xffffffff);
-			hdmirx_update_bits(hdmirx_dev, DMA_CONFIG4,
-					   LINE_FLAG_INT_EN |
-					   HDMIRX_DMA_IDLE_INT |
-					   HDMIRX_LOCK_DISABLE_INT |
-					   LAST_FRAME_AXI_UNFINISH_INT_EN |
-					   FIFO_OVERFLOW_INT_EN |
-					   FIFO_UNDERFLOW_INT_EN |
-					   HDMIRX_AXI_ERROR_INT_EN, 0);
+			hdmirx_update_bits(hdmirx_dev, DMA_CONFIG4, DMA_CONFIG_4_BITS, 0);
 			wake_up(&stream->wq_stopped);
 			return IRQ_HANDLED;
 		}
@@ -3113,28 +2839,12 @@ static irqreturn_t hdmirx_dma_irq_handler(int irq, void *dev_id)
 		line_flag_int_handler(hdmirx_dev, &handled);
 
 	if (!handled)
-		v4l2_dbg(3, debug, v4l2_dev,
-			 "%s: dma irq not handled, dma_stat1:%#x!\n",
-			 __func__, dma_stat1);
+		v4l2_dbg(3, debug, v4l2_dev, "%s: dma irq not handled, dma_stat1:%#x!\n", __func__, dma_stat1);
 
 	stream->irq_stat = dma_stat1;
 	hdmirx_writel(hdmirx_dev, DMA_CONFIG5, 0xffffffff);
 
 	return IRQ_HANDLED;
-}
-
-static void hdmirx_audio_interrupts_setup(struct rk_hdmirx_dev *hdmirx_dev, bool en)
-{
-	//dev_info(hdmirx_dev->dev, "%s: %d", __func__, en);
-	if (en) {
-		hdmirx_update_bits(hdmirx_dev, AVPUNIT_1_INT_MASK_N,
-				   DEFRAMER_VSYNC_THR_REACHED_MASK_N,
-				   DEFRAMER_VSYNC_THR_REACHED_MASK_N);
-	} else {
-		hdmirx_update_bits(hdmirx_dev, AVPUNIT_1_INT_MASK_N,
-				   DEFRAMER_VSYNC_THR_REACHED_MASK_N,
-				   0);
-	}
 }
 
 static void hdmirx_interrupts_setup(struct rk_hdmirx_dev *hdmirx_dev, bool en)
@@ -3210,10 +2920,9 @@ static void hdmirx_plugin(struct rk_hdmirx_dev *hdmirx_dev)
 
 	rockchip_set_system_status(SYS_STATUS_HDMIRX);
 	cpu_latency_qos_update_request(&hdmirx_dev->pm_qos, 0);
-	schedule_delayed_work_on(hdmirx_dev->bound_cpu,
-		&hdmirx_dev->delayed_work_heartbeat, msecs_to_jiffies(10));
+	schedule_delayed_work_on(hdmirx_dev->bound_cpu, &hdmirx_dev->delayed_work_heartbeat, msecs_to_jiffies(10));
 	sip_wdt_config(WDT_START, 0, 0, 0);
-	hdmirx_set_cpu_limit_freq(hdmirx_dev);
+	// hdmirx_set_cpu_limit_freq(hdmirx_dev);
 	hdmirx_interrupts_setup(hdmirx_dev, false);
 	hdmirx_submodule_init(hdmirx_dev);
 	hdmirx_update_bits(hdmirx_dev, SCDC_CONFIG, POWERPROVIDED,
@@ -3296,341 +3005,12 @@ static void hdmirx_delayed_work_hotplug(struct work_struct *work)
 	mutex_unlock(&hdmirx_dev->work_lock);
 }
 
-static u32 hdmirx_audio_ch(struct rk_hdmirx_dev *hdmirx_dev)
-{
-	u32 acr_pb3_0, acr_pb7_4, ch, ca;
-
-	hdmirx_readl(hdmirx_dev, PKTDEC_AUDIF_PH2_1);
-	acr_pb3_0 = hdmirx_readl(hdmirx_dev, PKTDEC_AUDIF_PB3_0);
-	acr_pb7_4 =  hdmirx_readl(hdmirx_dev, PKTDEC_AUDIF_PB7_4);
-	ca = acr_pb7_4 & 0xff;
-	ch = ((acr_pb3_0>>8) & 0x07) + 1;
-	dev_dbg(hdmirx_dev->dev, "%s: acr_pb3_0=%#x; ch=%u; ca=%#x\n",
-		__func__, acr_pb3_0, ch, ca);
-	return ch;
-}
-
-static u32 hdmirx_audio_fs(struct rk_hdmirx_dev *hdmirx_dev)
-{
-	u64 tmds_clk, fs_audio = 0;
-	u32 acr_cts, acr_n, tmdsqpclk_freq;
-	u32 acr_pb7_4, acr_pb3_0;
-
-	tmdsqpclk_freq = hdmirx_readl(hdmirx_dev, CMU_TMDSQPCLK_FREQ);
-	hdmirx_readl(hdmirx_dev, PKTDEC_ACR_PH2_1);
-	acr_pb7_4 = hdmirx_readl(hdmirx_dev, PKTDEC_ACR_PB3_0);
-	acr_pb3_0 = hdmirx_readl(hdmirx_dev, PKTDEC_ACR_PB7_4);
-	acr_cts = __be32_to_cpu(acr_pb7_4) & 0xfffff;
-	acr_n = (__be32_to_cpu(acr_pb3_0) & 0x0fffff00) >> 8;
-	tmds_clk = tmdsqpclk_freq * 4 * 1000U;
-	if (acr_cts != 0) {
-		fs_audio = div_u64((tmds_clk * acr_n), acr_cts);
-		fs_audio /= 128;
-		fs_audio = div_u64(fs_audio + 50, 100);
-		fs_audio *= 100;
-	}
-	dev_dbg(hdmirx_dev->dev, "%s: fs_audio=%llu; acr_cts=%u; acr_n=%u\n",
-		__func__, fs_audio, acr_cts, acr_n);
-	return fs_audio;
-}
-
-static void hdmirx_audio_set_ch(struct rk_hdmirx_dev *hdmirx_dev, u32 ch_audio)
-{
-	hdmirx_dev->audio_state.ch_audio = ch_audio;
-}
-
-static void hdmirx_audio_set_fs(struct rk_hdmirx_dev *hdmirx_dev, u32 fs_audio)
-{
-	u32 hdmirx_aud_clkrate_t = fs_audio*128;
-
-	dev_dbg(hdmirx_dev->dev, "%s: %u to %u with fs %u\n", __func__,
-		hdmirx_dev->audio_state.hdmirx_aud_clkrate, hdmirx_aud_clkrate_t,
-		fs_audio);
-	clk_set_rate(hdmirx_dev->clks[1].clk, hdmirx_aud_clkrate_t);
-	hdmirx_dev->audio_state.hdmirx_aud_clkrate = hdmirx_aud_clkrate_t;
-	hdmirx_dev->audio_state.fs_audio = fs_audio;
-}
-
-static void hdmirx_audio_fifo_init(struct rk_hdmirx_dev *hdmirx_dev)
-{
-	dev_info(hdmirx_dev->dev, "%s\n", __func__);
-	hdmirx_writel(hdmirx_dev, AUDIO_FIFO_CONTROL, 1);
-	usleep_range(200, 210);
-	hdmirx_writel(hdmirx_dev, AUDIO_FIFO_CONTROL, 0);
-}
-
-static void hdmirx_audio_clk_ppm_inc(struct rk_hdmirx_dev *hdmirx_dev, int ppm)
-{
-	int delta, rate, inc;
-
-	rate = hdmirx_dev->audio_state.hdmirx_aud_clkrate;
-	if (ppm < 0) {
-		ppm = -ppm;
-		inc = -1;
-	} else
-		inc = 1;
-	delta = (int)div64_u64((uint64_t)rate * ppm + 500000, 1000000);
-	delta *= inc;
-	rate = hdmirx_dev->audio_state.hdmirx_aud_clkrate + delta;
-	dev_dbg(hdmirx_dev->dev, "%s: %u to %u(delta:%d)\n",
-		__func__, hdmirx_dev->audio_state.hdmirx_aud_clkrate, rate, delta);
-	clk_set_rate(hdmirx_dev->clks[1].clk, rate);
-	hdmirx_dev->audio_state.hdmirx_aud_clkrate = rate;
-}
-
-static void hdmirx_audio_set_state(struct rk_hdmirx_dev *hdmirx_dev, enum audio_stat stat)
-{
-	switch (stat) {
-	case AUDIO_OFF:
-		cancel_delayed_work_sync(&hdmirx_dev->delayed_work_audio);
-		hdmirx_update_bits(hdmirx_dev, GLOBAL_SWENABLE, AUDIO_ENABLE, 0);
-		break;
-	case AUDIO_ON:
-		schedule_delayed_work_on(hdmirx_dev->bound_cpu,
-					 &hdmirx_dev->delayed_work_audio, HZ / 2);
-		break;
-	default:
-		break;
-	}
-}
-
-static void hdmirx_audio_setup(struct rk_hdmirx_dev *hdmirx_dev)
-{
-	struct hdmirx_audiostate *as = &hdmirx_dev->audio_state;
-
-	as->ctsn_flag = 0;
-	as->fs_audio = 0;
-	as->ch_audio = 0;
-	as->pre_state = 0;
-	as->init_state = INIT_FIFO_STATE*4;
-	as->fifo_int = false;
-	as->audio_enabled = false;
-	hdmirx_audio_set_fs(hdmirx_dev, 44100);
-	/* Disable audio domain */
-	hdmirx_update_bits(hdmirx_dev, GLOBAL_SWENABLE, AUDIO_ENABLE, 0);
-	/* Configure Vsync interrupt threshold */
-	hdmirx_update_bits(hdmirx_dev, DEFRAMER_CONFIG0, VS_CNT_THR_QST_MASK, VS_CNT_THR_QST(3));
-	hdmirx_audio_interrupts_setup(hdmirx_dev, true);
-	hdmirx_writel(hdmirx_dev, DEFRAMER_VSYNC_CNT_CLEAR, VSYNC_CNT_CLR_P);
-	hdmirx_clear_interrupt(hdmirx_dev, AVPUNIT_1_INT_CLEAR, DEFRAMER_VSYNC_THR_REACHED_CLEAR);
-	hdmirx_writel(hdmirx_dev, AUDIO_FIFO_THR_PASS, INIT_FIFO_STATE);
-	hdmirx_writel(hdmirx_dev, AUDIO_FIFO_THR,
-		      AFIFO_THR_LOW_QST(0x20) | AFIFO_THR_HIGH_QST(0x160));
-	hdmirx_writel(hdmirx_dev, AUDIO_FIFO_MUTE_THR,
-		      AFIFO_THR_MUTE_LOW_QST(0x8) | AFIFO_THR_MUTE_HIGH_QST(0x178));
-}
-
-static int hdmirx_audio_hw_params(struct device *dev, void *data,
-				  struct hdmi_codec_daifmt *daifmt,
-				  struct hdmi_codec_params *params)
-{
-	dev_dbg(dev, "%s\n", __func__);
-	return 0;
-}
-
-static int hdmirx_audio_startup(struct device *dev, void *data)
-{
-	struct rk_hdmirx_dev *hdmirx_dev = dev_get_drvdata(dev);
-
-	if (tx_5v_power_present(hdmirx_dev) && hdmirx_dev->audio_present)
-		return 0;
-	dev_err(dev, "%s: device is no connected or audio is off\n", __func__);
-	return -ENODEV;
-}
-
-static void hdmirx_audio_shutdown(struct device *dev, void *data)
-{
-	dev_dbg(dev, "%s\n", __func__);
-}
-
-static int hdmirx_audio_get_dai_id(struct snd_soc_component *comment,
-				   struct device_node *endpoint)
-{
-	dev_dbg(comment->dev, "%s\n", __func__);
-	return 0;
-}
-
-static void hdmirx_audio_handle_plugged_change(struct rk_hdmirx_dev *hdmirx_dev, bool plugged)
-{
-	if (hdmirx_dev->plugged_cb && hdmirx_dev->codec_dev)
-		hdmirx_dev->plugged_cb(hdmirx_dev->codec_dev, plugged);
-}
-
-static int hdmirx_audio_hook_plugged_cb(struct device *dev, void *data,
-					hdmi_codec_plugged_cb fn,
-					struct device *codec_dev)
-{
-	struct rk_hdmirx_dev *hdmirx_dev = dev_get_drvdata(dev);
-
-	dev_dbg(dev, "%s\n", __func__);
-	mutex_lock(&hdmirx_dev->work_lock);
-	hdmirx_dev->plugged_cb = fn;
-	hdmirx_dev->codec_dev = codec_dev;
-	hdmirx_audio_handle_plugged_change(hdmirx_dev, tx_5v_power_present(hdmirx_dev));
-	mutex_unlock(&hdmirx_dev->work_lock);
-	return 0;
-}
-
-static const struct hdmi_codec_ops hdmirx_audio_codec_ops = {
-	.hw_params = hdmirx_audio_hw_params,
-	.audio_startup = hdmirx_audio_startup,
-	.audio_shutdown = hdmirx_audio_shutdown,
-	.get_dai_id = hdmirx_audio_get_dai_id,
-	.hook_plugged_cb = hdmirx_audio_hook_plugged_cb
-};
-
-static int hdmirx_register_audio_device(struct rk_hdmirx_dev *hdmirx_dev)
-{
-	struct hdmirx_audiostate *as = &hdmirx_dev->audio_state;
-	struct hdmi_codec_pdata codec_data = {
-		.ops = &hdmirx_audio_codec_ops,
-		.spdif = 1,
-		.i2s = 1,
-		.max_i2s_channels = 8,
-		.data = hdmirx_dev,
-	};
-
-	as->pdev = platform_device_register_data(hdmirx_dev->dev,
-						 HDMI_CODEC_DRV_NAME,
-						 PLATFORM_DEVID_AUTO,
-						 &codec_data,
-						 sizeof(codec_data));
-
-	return PTR_ERR_OR_ZERO(as->pdev);
-}
-
-static void hdmirx_unregister_audio_device(void *data)
-{
-	struct rk_hdmirx_dev *hdmirx_dev = data;
-	struct hdmirx_audiostate *as = &hdmirx_dev->audio_state;
-
-	if (as->pdev) {
-		platform_device_unregister(as->pdev);
-		as->pdev = NULL;
-	}
-}
-
 static void hdmirx_unregister_class_device(void *data)
 {
 	struct rk_hdmirx_dev *hdmirx_dev = data;
 	struct device *dev = hdmirx_dev->classdev;
 
 	device_unregister(dev);
-}
-
-static const char *audio_fifo_err(u32 fifo_status)
-{
-	switch (fifo_status & (AFIFO_UNDERFLOW_ST | AFIFO_OVERFLOW_ST)) {
-	case AFIFO_UNDERFLOW_ST:
-		return "underflow";
-	case AFIFO_OVERFLOW_ST:
-		return "overflow";
-	case AFIFO_UNDERFLOW_ST | AFIFO_OVERFLOW_ST:
-		return "underflow and overflow";
-	}
-	return "underflow or overflow";
-}
-
-static void hdmirx_enable_audio_output(struct rk_hdmirx_dev *hdmirx_dev,
-				      int ch_audio, int fs_audio, int spdif)
-{
-	if (spdif) {
-		dev_warn(hdmirx_dev->dev, "We don't recommend using spdif\n");
-	} else {
-		if (ch_audio > 2) {
-			hdmirx_update_bits(hdmirx_dev, AUDIO_PROC_CONFIG0,
-					   SPEAKER_ALLOC_OVR_EN | I2S_EN,
-					   SPEAKER_ALLOC_OVR_EN | I2S_EN);
-			hdmirx_writel(hdmirx_dev, AUDIO_PROC_CONFIG3, 0xffffffff);
-		} else {
-			hdmirx_update_bits(hdmirx_dev, AUDIO_PROC_CONFIG0,
-					   SPEAKER_ALLOC_OVR_EN | I2S_EN, I2S_EN);
-		}
-	}
-}
-
-static void hdmirx_delayed_work_audio(struct work_struct *work)
-{
-	struct delayed_work *dwork = to_delayed_work(work);
-	struct rk_hdmirx_dev *hdmirx_dev = container_of(dwork,
-							struct rk_hdmirx_dev,
-							delayed_work_audio);
-	struct hdmirx_audiostate *as = &hdmirx_dev->audio_state;
-	u32 fs_audio, ch_audio, sample_flat;
-	int cur_state, init_state, pre_state, fifo_status2;
-	unsigned long delay = 200;
-
-	if (!as->audio_enabled) {
-		dev_info(hdmirx_dev->dev, "%s: enable audio\n", __func__);
-		hdmirx_update_bits(hdmirx_dev, GLOBAL_SWENABLE, AUDIO_ENABLE, AUDIO_ENABLE);
-		hdmirx_writel(hdmirx_dev, GLOBAL_SWRESET_REQUEST, AUDIO_SWRESETREQ);
-		as->audio_enabled = true;
-	}
-	fs_audio = hdmirx_audio_fs(hdmirx_dev);
-	ch_audio = hdmirx_audio_ch(hdmirx_dev);
-	fifo_status2 =  hdmirx_readl(hdmirx_dev, AUDIO_FIFO_STATUS2);
-	if (fifo_status2 & (AFIFO_UNDERFLOW_ST | AFIFO_OVERFLOW_ST)) {
-		dev_warn(hdmirx_dev->dev, "%s: audio %s %#x, with fs %svalid %d\n",
-			 __func__, audio_fifo_err(fifo_status2), fifo_status2,
-			 is_validfs(fs_audio) ? "" : "in", fs_audio);
-		if (is_validfs(fs_audio)) {
-			hdmirx_audio_set_fs(hdmirx_dev, fs_audio);
-			hdmirx_audio_set_ch(hdmirx_dev, ch_audio);
-			hdmirx_enable_audio_output(hdmirx_dev, ch_audio, fs_audio, 0);
-		}
-		hdmirx_audio_fifo_init(hdmirx_dev);
-		as->pre_state = 0;
-		goto exit;
-	}
-	cur_state = fifo_status2 & 0xFFFF;
-	init_state = as->init_state;
-	pre_state = as->pre_state;
-	dev_dbg(hdmirx_dev->dev, "%s: HDMI_RX_AUD_FIFO_FILLSTS1:%#x, single offset:%d, total offset:%d\n",
-		__func__, cur_state, cur_state - pre_state, cur_state - init_state);
-	if (!is_validfs(fs_audio)) {
-		v4l2_dbg(1, debug, &hdmirx_dev->v4l2_dev,
-			 "%s: no supported fs(%u), cur_state %d\n",
-			 __func__, fs_audio, cur_state);
-		delay = 1000;
-	} else if (abs(fs_audio - as->fs_audio) > 1000 || ch_audio != as->ch_audio) {
-		dev_info(hdmirx_dev->dev, "%s: restart audio fs(%d -> %d) ch(%d -> %d)\n",
-			 __func__, as->fs_audio, fs_audio, as->ch_audio, ch_audio);
-		hdmirx_audio_set_fs(hdmirx_dev, fs_audio);
-		hdmirx_audio_set_ch(hdmirx_dev, ch_audio);
-		hdmirx_enable_audio_output(hdmirx_dev, ch_audio, fs_audio, 0);
-		hdmirx_audio_fifo_init(hdmirx_dev);
-		as->pre_state = 0;
-		goto exit;
-	}
-
-	if (cur_state != 0) {
-		if (!hdmirx_dev->audio_present) {
-			dev_info(hdmirx_dev->dev, "audio on");
-			hdmirx_audio_handle_plugged_change(hdmirx_dev, 1);
-			process_audio_change(hdmirx_dev);
-			hdmirx_dev->audio_present = true;
-		}
-		if (cur_state - init_state > 16 && cur_state - pre_state > 0)
-			hdmirx_audio_clk_ppm_inc(hdmirx_dev, 10);
-		else if (cur_state - init_state < -16 && cur_state - pre_state < 0)
-			hdmirx_audio_clk_ppm_inc(hdmirx_dev, -10);
-	} else {
-		if (hdmirx_dev->audio_present) {
-			dev_info(hdmirx_dev->dev, "audio off");
-			hdmirx_audio_handle_plugged_change(hdmirx_dev, 0);
-			process_audio_change(hdmirx_dev);
-			hdmirx_dev->audio_present = false;
-		}
-	}
-	as->pre_state = cur_state;
-
-	sample_flat = hdmirx_readl(hdmirx_dev, AUDIO_PROC_STATUS1) & AUD_SAMPLE_FLAT;
-	hdmirx_update_bits(hdmirx_dev, AUDIO_PROC_CONFIG0, I2S_EN, sample_flat ? 0 : I2S_EN);
-
-exit:
-	schedule_delayed_work_on(hdmirx_dev->bound_cpu,
-			&hdmirx_dev->delayed_work_audio,
-			msecs_to_jiffies(delay));
 }
 
 static void hdmirx_delayed_work_res_change(struct work_struct *work)
