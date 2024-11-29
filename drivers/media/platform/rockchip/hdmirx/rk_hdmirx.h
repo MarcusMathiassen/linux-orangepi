@@ -52,6 +52,7 @@
 #include <soc/rockchip/rockchip-system-status.h>
 #include <sound/hdmi-codec.h>
 #include <linux/rk_hdmirx_class.h>
+
 #include "rk_hdmirx.h"
 #include "rk_hdmirx_cec.h"
 #include "rk_hdmirx_hdcp.h"
@@ -513,6 +514,33 @@
 
 #define INIT_FIFO_STATE			64
 
+#define	RK_HDMIRX_DRVNAME		"mota_hdmi_rx"
+#define EDID_NUM_BLOCKS_MAX		2
+#define EDID_BLOCK_SIZE			128
+#define HDMIRX_DEFAULT_TIMING		V4L2_DV_BT_CEA_640X480P59_94
+#define HDMIRX_VDEV_NAME		"mota_hdmi_rx"
+#define HDMIRX_REQ_BUFS_MIN		2
+#define HDMIRX_STORED_BIT_WIDTH		8
+#define IREF_CLK_FREQ_HZ		428571429
+#define MEMORY_ALIGN_ROUND_UP_BYTES	64
+#define HDMIRX_PLANE_Y			0
+#define HDMIRX_PLANE_CBCR		1
+#define RK_IRQ_HDMIRX_HDMI		210
+#define CPU_LIMIT_FREQ_KHZ		1200000
+#define WAIT_PHY_REG_TIME		50
+#define WAIT_TIMER_LOCK_TIME		50
+#define WAIT_SIGNAL_LOCK_TIME		600 /* if 5V present: 7ms each time */
+#define NO_LOCK_CFG_RETRY_TIME		300
+#define WAIT_LOCK_STABLE_TIME		20
+#define WAIT_AVI_PKT_TIME		300
+
+#define DMA_CONFIG_4_BITS (LINE_FLAG_INT_EN | HDMIRX_DMA_IDLE_INT | HDMIRX_LOCK_DISABLE_INT | LAST_FRAME_AXI_UNFINISH_INT_EN | FIFO_OVERFLOW_INT_EN | FIFO_UNDERFLOW_INT_EN | HDMIRX_AXI_ERROR_INT_EN)
+
+static char *hdmirx_color_space[8] = {
+	"xvYCC601", "xvYCC709", "sYCC601", "Adobe_YCC601",
+	"Adobe_RGB", "BT2020_YcCbcCrc", "BT2020_RGB_OR_YCbCr"
+};
+
 enum hdmirx_pix_fmt {
 	HDMIRX_RGB888 = 0,
 	HDMIRX_YUV422 = 1,
@@ -571,13 +599,6 @@ struct hdmirx_buffer {
 		u32 buff_addr[VIDEO_MAX_PLANES];
 		void *vaddr[VIDEO_MAX_PLANES];
 	};
-};
-
-struct hdmirx_output_fmt {
-	u32 fourcc;
-	u8 cplanes;
-	u8 mplanes;
-	u8 bpp[VIDEO_MAX_PLANES];
 };
 
 struct hdmirx_stream {
@@ -702,6 +723,12 @@ void hdmirx_writel(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 val);
 u32 hdmirx_readl(struct rk_hdmirx_dev *hdmirx_dev, int reg);
 void hdmirx_clear_interrupt(struct rk_hdmirx_dev *hdmirx_dev, u32 reg, u32 val);
 void hdmirx_update_bits(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 mask, u32 data);
+void hdmirx_hpd_config(struct rk_hdmirx_dev *hdmirx_dev, bool en);
+
 bool tx_5v_power_present(struct rk_hdmirx_dev *hdmirx_dev);
+void hdmirx_plugout(struct rk_hdmirx_dev *hdmirx_dev);
+void process_signal_change(struct rk_hdmirx_dev *hdmirx_dev);
+
+int hdmirx_write_edid(struct rk_hdmirx_dev *hdmirx_dev, struct v4l2_edid *edid, bool hpd_up);
 
 #endif

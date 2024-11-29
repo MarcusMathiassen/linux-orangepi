@@ -62,7 +62,7 @@ struct rk_hdmirx_hdcp {
 	void (*hdcp2_connect_ctrl)(struct rk_hdmirx_hdcp *hdcp, bool en);
 };
 
-struct rk_hdmirx_hdcp *rk_hdmirx_hdcp_register(struct rk_hdmirx_hdcp *hdcp);
-void rk_hdmirx_hdcp_unregister(struct rk_hdmirx_hdcp *hdcp);
+void hdmirx_hdcp_register(struct device *dev, struct rk_hdmirx_dev *hdmirx_dev, u8 hdcp_enable);
+void hdmirx_hdcp_unregister(struct rk_hdmirx_hdcp *hdcp);
 
 #endif /* __RK_HDMIRX_HDCP_H__ */

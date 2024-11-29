@@ -367,7 +367,7 @@ static ssize_t test_key1x_store(struct device *device,
 
 static DEVICE_ATTR_WO(test_key1x);
 
-struct rk_hdmirx_hdcp *rk_hdmirx_hdcp_register(struct rk_hdmirx_hdcp *hdcp_data)
+static struct rk_hdmirx_hdcp *rk_hdmirx_hdcp_register(struct rk_hdmirx_hdcp *hdcp_data)
 {
 	int ret = 0;
 	struct rk_hdmirx_hdcp *hdcp;
@@ -437,7 +437,22 @@ error0:
 	return NULL;
 }
 
-void rk_hdmirx_hdcp_unregister(struct rk_hdmirx_hdcp *hdcp)
+void hdmirx_hdcp_register(struct device *dev, struct rk_hdmirx_dev *hdmirx_dev, u8 hdcp_enable)
+{
+	struct rk_hdmirx_hdcp hdmirx_hdcp = {
+		.hdmirx = hdmirx_dev,
+		.write = hdmirx_writel,
+		.read = hdmirx_readl,
+		.hpd_config = hdmirx_hpd_config,
+		.tx_5v_power = tx_5v_power_present,
+		.enable = hdcp_enable,
+		.dev = hdmirx_dev->dev,
+	};
+
+	hdmirx_dev->hdcp = rk_hdmirx_hdcp_register(&hdmirx_hdcp);
+}
+
+void hdmirx_hdcp_unregister(struct rk_hdmirx_hdcp *hdcp)
 {
 	device_remove_file(hdcp->mdev.this_device, &dev_attr_enable);
 	device_remove_file(hdcp->mdev.this_device, &dev_attr_status);

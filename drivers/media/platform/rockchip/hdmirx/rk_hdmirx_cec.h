@@ -9,6 +9,7 @@
 #define __RK_HDMIRX_CEC_H__
 
 struct rk_hdmirx_dev;
+struct work_struct;
 
 struct hdmirx_cec_ops {
 	void (*write)(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 val);
@@ -42,5 +43,6 @@ struct hdmirx_cec {
 
 struct hdmirx_cec *rk_hdmirx_cec_register(struct hdmirx_cec_data *data);
 void rk_hdmirx_cec_unregister(struct hdmirx_cec *cec);
+void hdmirx_delayed_work_cec(struct work_struct *work);
 
 #endif /* __DW_HDMI_RX_CEC_H__ */

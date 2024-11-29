@@ -44,6 +44,8 @@
 #include <sound/hdmi-codec.h>
 #include <linux/rk_hdmirx_class.h>
 
+#include "rk_hdmirx.h"
+
 #define is_validfs(x) (x == 32000 || \
 			x == 44100 || \
 			x == 48000 || \
@@ -160,7 +162,7 @@ void hdmirx_audio_set_state(struct rk_hdmirx_dev *hdmirx_dev, enum audio_stat st
 	}
 }
 
-void hdmirx_audio_interrupts_setup(struct rk_hdmirx_dev *hdmirx_dev, bool en)
+void hdmirx_audio_interrupts_setup(struct rk_hdmirx_dev *hdmirx_dev, int en)
 {
 	//dev_info(hdmirx_dev->dev, "%s: %d", __func__, en);
 	if (en) {
@@ -228,7 +230,7 @@ static int hdmirx_audio_get_dai_id(struct snd_soc_component *comment,
 	return 0;
 }
 
-void hdmirx_audio_handle_plugged_change(struct rk_hdmirx_dev *hdmirx_dev, bool plugged)
+void hdmirx_audio_handle_plugged_change(struct rk_hdmirx_dev *hdmirx_dev, int plugged)
 {
 	if (hdmirx_dev->plugged_cb && hdmirx_dev->codec_dev)
 		hdmirx_dev->plugged_cb(hdmirx_dev->codec_dev, plugged);

@@ -188,6 +188,14 @@ static void hdmirx_cec_del(void *data)
 	cec_delete_adapter(cec->adap);
 }
 
+void hdmirx_delayed_work_cec(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct rk_hdmirx_dev *hdmirx_dev = container_of(dwork, struct rk_hdmirx_dev, delayed_work_cec);
+	cec_queue_pin_hpd_event(hdmirx_dev->cec->adap, tx_5v_power_present(hdmirx_dev), ktime_get());
+}
+
+
 struct hdmirx_cec *rk_hdmirx_cec_register(struct hdmirx_cec_data *data)
 {
 	struct hdmirx_cec *cec;
