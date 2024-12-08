@@ -466,8 +466,7 @@ irqreturn_t hdmirx_dma_irq_handler(int irq, void *dev_id)
 
 	dma_stat1 = hdmirx_readl(hdmirx_dev, DMA_STATUS1);
 	dma_stat13 = hdmirx_readl(hdmirx_dev, DMA_STATUS13);
-	v4l2_dbg(3, debug, v4l2_dev, "dma_irq st1:%#x, st13:%d\n",
-			dma_stat1, dma_stat13);
+	// v4l2_dbg(3, debug, v4l2_dev, "dma_irq st1:%#x, st13:%d\n", dma_stat1, dma_stat13);
 
 	if (dma_stat1 & HDMIRX_DMA_IDLE_INT) {
 		if (stream->stopping) {
@@ -937,8 +936,7 @@ static void hdmirx_set_fmt(struct hdmirx_stream *stream, struct v4l2_pix_format_
 		}
 
 		bpp = hdmirx_align_bits_per_pixel(fmt, i);
-		bpl = ALIGN(width * bpp / HDMIRX_STORED_BIT_WIDTH,
-				MEMORY_ALIGN_ROUND_UP_BYTES);
+		bpl = ALIGN(width * bpp / HDMIRX_STORED_BIT_WIDTH, MEMORY_ALIGN_ROUND_UP_BYTES);
 		size = bpl * height;
 		imagesize += size;
 
@@ -1279,8 +1277,7 @@ void hdmirx_get_colordepth(struct rk_hdmirx_dev *hdmirx_dev)
 		break;
 	}
 
-	v4l2_dbg(1, debug, v4l2_dev, "%s: color_depth: %d, reg_val:%d\n",
-			__func__, hdmirx_dev->color_depth, color_depth_reg);
+	v4l2_dbg(1, debug, v4l2_dev, "%s: color_depth: %d, reg_val:%d\n", __func__, hdmirx_dev->color_depth, color_depth_reg);
 }
 
 void hdmirx_get_pix_fmt(struct rk_hdmirx_dev *hdmirx_dev)
@@ -1339,8 +1336,7 @@ try_loop:
 		hdmirx_writel(hdmirx_dev, VIDEO_MUTE_VALUE_L, 0x00008000);
 	}
 
-	v4l2_dbg(1, debug, v4l2_dev, "%s: pix_fmt: %s\n", __func__,
-			pix_fmt_str[hdmirx_dev->pix_fmt]);
+	v4l2_dbg(1, debug, v4l2_dev, "%s: pix_fmt: %s\n", __func__, pix_fmt_str[hdmirx_dev->pix_fmt]);
 }
 
 void hdmirx_get_color_space(struct rk_hdmirx_dev *hdmirx_dev)
@@ -1357,8 +1353,7 @@ void hdmirx_get_color_space(struct rk_hdmirx_dev *hdmirx_dev)
 	val = hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PB3_0);
 	hdmirx_dev->cur_color_space = (val & EXTEND_COLORIMETRY) >> 28;
 
-	v4l2_dbg(2, debug, v4l2_dev, "%s: video standard: %s\n", __func__,
-		 hdmirx_color_space[hdmirx_dev->cur_color_space]);
+	v4l2_dbg(2, debug, v4l2_dev, "%s: video standard: %s\n", __func__, hdmirx_color_space[hdmirx_dev->cur_color_space]);
 }
 
 void hdmirx_get_color_range(struct rk_hdmirx_dev *hdmirx_dev)
@@ -1408,8 +1403,7 @@ static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct 
 	hdmirx_get_pix_fmt(hdmirx_dev);
 	hdmirx_get_color_range(hdmirx_dev);
 	hdmirx_get_color_space(hdmirx_dev);
-	bt->interlaced = field_type & BIT(0) ?
-		V4L2_DV_INTERLACED : V4L2_DV_PROGRESSIVE;
+	bt->interlaced = field_type & BIT(0) ? V4L2_DV_INTERLACED : V4L2_DV_PROGRESSIVE;
 	hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PH2_1);
 	val = hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PB7_4);
 	hdmirx_dev->cur_vic =  val & VIC_VAL_MASK;
@@ -1422,16 +1416,13 @@ static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct 
 	tmp_data = tmds_clk * 24;
 	do_div(tmp_data, color_depth);
 	pix_clk = tmp_data;
-	bt->pixelclock = tmds_clk;
+	bt->pixelclock = tmp_data;
 	if (hdmirx_dev->pix_fmt == HDMIRX_YUV420)
 		bt->pixelclock *= 2;
 	hdmirx_get_timings(hdmirx_dev, bt, from_dma);
 
-	v4l2_dbg(2, debug, v4l2_dev, "tmds_clk:%llu, pix_clk:%d\n", tmds_clk, pix_clk);
-	v4l2_dbg(1, debug, v4l2_dev, "interlace:%d, fmt:%d, vic:%d, color:%d, mode:%s\n",
-		 bt->interlaced, hdmirx_dev->pix_fmt,
-		 hdmirx_dev->cur_vic, hdmirx_dev->color_depth,
-		 hdmirx_dev->is_dvi_mode ? "dvi" : "hdmi");
+	v4l2_dbg(2, debug, v4l2_dev, "tmp_data:%llu, pix_clk:%d\n", tmds_clk, pix_clk);
+	v4l2_dbg(1, debug, v4l2_dev, "interlace:%d, fmt:%d, vic:%d, color:%d, mode:%s\n", bt->interlaced, hdmirx_dev->pix_fmt, hdmirx_dev->cur_vic, hdmirx_dev->color_depth, hdmirx_dev->is_dvi_mode ? "dvi" : "hdmi");
 	v4l2_dbg(2, debug, v4l2_dev, "deframer_st:%#x\n", deframer_st);
 
 	if (!hdmirx_check_timing_valid(bt))

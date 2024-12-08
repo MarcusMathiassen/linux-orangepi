@@ -73,8 +73,7 @@ static u32 hdmirx_audio_ch(struct rk_hdmirx_dev *hdmirx_dev)
 	acr_pb7_4 =  hdmirx_readl(hdmirx_dev, PKTDEC_AUDIF_PB7_4);
 	ca = acr_pb7_4 & 0xff;
 	ch = ((acr_pb3_0>>8) & 0x07) + 1;
-	dev_dbg(hdmirx_dev->dev, "%s: acr_pb3_0=%#x; ch=%u; ca=%#x\n",
-		__func__, acr_pb3_0, ch, ca);
+	dev_dbg(hdmirx_dev->dev, "%s: acr_pb3_0=%#x; ch=%u; ca=%#x\n", __func__, acr_pb3_0, ch, ca);
 	return ch;
 }
 

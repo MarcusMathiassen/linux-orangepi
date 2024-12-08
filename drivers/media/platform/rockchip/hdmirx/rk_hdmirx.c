@@ -487,12 +487,10 @@ static void hdmirx_tmds_clk_ratio_config(struct rk_hdmirx_dev *hdmirx_dev)
 
 	if (hdmirx_dev->tmds_clk_ratio) {
 		v4l2_dbg(3, debug, v4l2_dev, "%s HDMITX greater than 3.4Gbps!\n", __func__);
-		hdmirx_update_bits(hdmirx_dev, PHY_CONFIG,
-				   TMDS_CLOCK_RATIO, TMDS_CLOCK_RATIO);
+		hdmirx_update_bits(hdmirx_dev, PHY_CONFIG, TMDS_CLOCK_RATIO, TMDS_CLOCK_RATIO);
 	} else {
 		v4l2_dbg(3, debug, v4l2_dev, "%s HDMITX less than 3.4Gbps!\n", __func__);
-		hdmirx_update_bits(hdmirx_dev, PHY_CONFIG,
-				   TMDS_CLOCK_RATIO, 0);
+		hdmirx_update_bits(hdmirx_dev, PHY_CONFIG, TMDS_CLOCK_RATIO, 0);
 	}
 }
 
@@ -514,13 +512,10 @@ static void hdmirx_phy_config(struct rk_hdmirx_dev *hdmirx_dev)
 	/* select cr para interface */
 	hdmirx_writel(hdmirx_dev, PHYCREG_CONFIG0, 0x3);
 
-	if (wait_reg_bit_status(hdmirx_dev, SYS_GRF_SOC_STATUS1,
-				HDMIRXPHY_SRAM_INIT_DONE,
-				HDMIRXPHY_SRAM_INIT_DONE, true, 10))
+	if (wait_reg_bit_status(hdmirx_dev, SYS_GRF_SOC_STATUS1, HDMIRXPHY_SRAM_INIT_DONE, HDMIRXPHY_SRAM_INIT_DONE, true, 10))
 		dev_err(dev, "%s phy SRAM init failed!\n", __func__);
 
-	regmap_write(hdmirx_dev->grf, SYS_GRF_SOC_CON1,
-		(HDMIRXPHY_SRAM_EXT_LD_DONE << 16) | HDMIRXPHY_SRAM_EXT_LD_DONE);
+	regmap_write(hdmirx_dev->grf, SYS_GRF_SOC_CON1, (HDMIRXPHY_SRAM_EXT_LD_DONE << 16) | HDMIRXPHY_SRAM_EXT_LD_DONE);
 	hdmirx_phy_register_write(hdmirx_dev, SUP_DIG_ANA_CREGS_SUP_ANA_NC, 2);
 	hdmirx_phy_register_write(hdmirx_dev, SUP_DIG_ANA_CREGS_SUP_ANA_NC, 3);
 	hdmirx_phy_register_write(hdmirx_dev, SUP_DIG_ANA_CREGS_SUP_ANA_NC, 2);
@@ -532,21 +527,11 @@ static void hdmirx_phy_config(struct rk_hdmirx_dev *hdmirx_dev)
 	hdmirx_phy_register_write(hdmirx_dev, SUP_DIG_ANA_CREGS_SUP_ANA_NC, 0);
 	hdmirx_phy_register_write(hdmirx_dev, SUP_DIG_ANA_CREGS_SUP_ANA_NC, 0);
 
-	hdmirx_phy_register_write(hdmirx_dev,
-			HDMIPCS_DIG_CTRL_PATH_MAIN_FSM_RATE_CALC_HDMI14_CDR_SETTING_3_REG,
-			CDR_SETTING_BOUNDARY_3_DEFAULT);
-	hdmirx_phy_register_write(hdmirx_dev,
-			HDMIPCS_DIG_CTRL_PATH_MAIN_FSM_RATE_CALC_HDMI14_CDR_SETTING_4_REG,
-			CDR_SETTING_BOUNDARY_4_DEFAULT);
-	hdmirx_phy_register_write(hdmirx_dev,
-			HDMIPCS_DIG_CTRL_PATH_MAIN_FSM_RATE_CALC_HDMI14_CDR_SETTING_5_REG,
-			CDR_SETTING_BOUNDARY_5_DEFAULT);
-	hdmirx_phy_register_write(hdmirx_dev,
-			HDMIPCS_DIG_CTRL_PATH_MAIN_FSM_RATE_CALC_HDMI14_CDR_SETTING_6_REG,
-			CDR_SETTING_BOUNDARY_6_DEFAULT);
-	hdmirx_phy_register_write(hdmirx_dev,
-			HDMIPCS_DIG_CTRL_PATH_MAIN_FSM_RATE_CALC_HDMI14_CDR_SETTING_7_REG,
-			CDR_SETTING_BOUNDARY_7_DEFAULT);
+	hdmirx_phy_register_write(hdmirx_dev, HDMIPCS_DIG_CTRL_PATH_MAIN_FSM_RATE_CALC_HDMI14_CDR_SETTING_3_REG, CDR_SETTING_BOUNDARY_3_DEFAULT);
+	hdmirx_phy_register_write(hdmirx_dev, HDMIPCS_DIG_CTRL_PATH_MAIN_FSM_RATE_CALC_HDMI14_CDR_SETTING_4_REG, CDR_SETTING_BOUNDARY_4_DEFAULT);
+	hdmirx_phy_register_write(hdmirx_dev, HDMIPCS_DIG_CTRL_PATH_MAIN_FSM_RATE_CALC_HDMI14_CDR_SETTING_5_REG, CDR_SETTING_BOUNDARY_5_DEFAULT);
+	hdmirx_phy_register_write(hdmirx_dev, HDMIPCS_DIG_CTRL_PATH_MAIN_FSM_RATE_CALC_HDMI14_CDR_SETTING_6_REG, CDR_SETTING_BOUNDARY_6_DEFAULT);
+	hdmirx_phy_register_write(hdmirx_dev, HDMIPCS_DIG_CTRL_PATH_MAIN_FSM_RATE_CALC_HDMI14_CDR_SETTING_7_REG, CDR_SETTING_BOUNDARY_7_DEFAULT);
 
 	hdmirx_update_bits(hdmirx_dev, PHY_CONFIG, PHY_PDDQ, 0);
 	if (wait_reg_bit_status(hdmirx_dev, PHY_STATUS, PDDQ_ACK, 0, false, 10))
@@ -612,33 +597,27 @@ static void hdmirx_controller_init(struct rk_hdmirx_dev *hdmirx_dev)
 			   CED_CHLOCKMAXER_QST(0x10));
 }
 
+static enum ddr_store_fmt get_store_fmt(struct rk_hdmirx_dev *hdmirx_dev)
+{
+	switch (hdmirx_dev->pix_fmt)
+	{
+		case HDMIRX_RGB888: return STORE_RGB888;
+		case HDMIRX_YUV444: return STORE_YUV444_8BIT;
+		case HDMIRX_YUV422: return STORE_YUV422_8BIT;
+		case HDMIRX_YUV420: return STORE_YUV420_8BIT;
+		default:
+			u32 dma_cfg1 = hdmirx_readl(hdmirx_dev, DMA_CONFIG1);
+			v4l2_dbg(1, debug, &hdmirx_dev->v4l2_dev, "unhandled pixfmt %d\n", hdmirx_dev->pix_fmt);
+			break;
+	}
+	return STORE_RGB888;
+}
 static void hdmirx_set_ddr_store_fmt(struct rk_hdmirx_dev *hdmirx_dev)
 {
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
-	enum ddr_store_fmt store_fmt;
-	u32 dma_cfg1;
-
-	switch (hdmirx_dev->pix_fmt) {
-	case HDMIRX_RGB888:
-		store_fmt = STORE_RGB888;
-		break;
-	case HDMIRX_YUV444:
-		store_fmt = STORE_YUV444_8BIT;
-		break;
-	case HDMIRX_YUV422:
-		store_fmt = STORE_YUV422_8BIT;
-		break;
-	case HDMIRX_YUV420:
-		store_fmt = STORE_YUV420_8BIT;
-		break;
-
-	default:
-		store_fmt = STORE_RGB888;
-		break;
-	}
-
+	enum ddr_store_fmt store_fmt = get_store_fmt(hdmirx_dev);
 	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG1, DDR_STORE_FORMAT_MASK, DDR_STORE_FORMAT(store_fmt));
-	dma_cfg1 = hdmirx_readl(hdmirx_dev, DMA_CONFIG1);
+	u32 dma_cfg1 = hdmirx_readl(hdmirx_dev, DMA_CONFIG1);
 	v4l2_dbg(1, debug, v4l2_dev, "%s: pix_fmt: %s, DMA_CONFIG1:%#x\n", __func__, pix_fmt_str[hdmirx_dev->pix_fmt], dma_cfg1);
 }
 
@@ -724,16 +703,8 @@ static void hdmirx_dma_config(struct rk_hdmirx_dev *hdmirx_dev)
 	else
 		hdmirx_update_bits(hdmirx_dev, DMA_CONFIG6, RB_SWAP_EN, 0);
 
-	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG7,
-				LOCK_FRAME_NUM_MASK,
-				LOCK_FRAME_NUM(2));
-	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG1,
-				UV_WID_MASK |
-				Y_WID_MASK |
-				ABANDON_EN,
-				UV_WID(1) |
-				Y_WID(2) |
-				ABANDON_EN);
+	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG7, LOCK_FRAME_NUM_MASK, LOCK_FRAME_NUM(2));
+	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG1, UV_WID_MASK | Y_WID_MASK | ABANDON_EN, UV_WID(1) | Y_WID(2) | ABANDON_EN);
 }
 
 static void hdmirx_submodule_init(struct rk_hdmirx_dev *hdmirx_dev)
@@ -1147,7 +1118,7 @@ static void hdmirx_plugin(struct rk_hdmirx_dev *hdmirx_dev)
 	cpu_latency_qos_update_request(&hdmirx_dev->pm_qos, 0);
 	schedule_delayed_work_on(hdmirx_dev->bound_cpu, &hdmirx_dev->delayed_work_heartbeat, msecs_to_jiffies(10));
 	sip_wdt_config(WDT_START, 0, 0, 0);
-	// hdmirx_set_cpu_limit_freq(hdmirx_dev);
+	hdmirx_set_cpu_limit_freq(hdmirx_dev);
 	hdmirx_interrupts_setup(hdmirx_dev, false);
 	hdmirx_submodule_init(hdmirx_dev);
 	hdmirx_update_bits(hdmirx_dev, SCDC_CONFIG, POWERPROVIDED,
