@@ -716,6 +716,10 @@ struct rk_hdmirx_dev {
 	spinlock_t fence_lock;
 };
 
+/* module parameters, defined in rk_hdmirx.c */
+extern int debug;
+extern bool low_latency;
+
 void hdmirx_writel(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 val);
 u32 hdmirx_readl(struct rk_hdmirx_dev *hdmirx_dev, int reg);
 void hdmirx_clear_interrupt(struct rk_hdmirx_dev *hdmirx_dev, u32 reg, u32 val);

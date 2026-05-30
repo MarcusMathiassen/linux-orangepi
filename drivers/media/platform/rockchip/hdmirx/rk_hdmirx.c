@@ -55,11 +55,11 @@
 #include "rk_hdmirx_audio.h"
 #include "rk_hdmirx_video.h"
 
-static int debug;
+int debug;
 module_param(debug, int, 0644);
 MODULE_PARM_DESC(debug, "debug level (0-4)");
 
-static bool low_latency;
+bool low_latency;
 module_param(low_latency, bool, 0644);
 MODULE_PARM_DESC(low_latency, "low_latency en(0-1)");
 

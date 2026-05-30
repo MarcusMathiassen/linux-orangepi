@@ -48,9 +48,6 @@
 #define HDMIRX_PLANE_Y			0
 #define HDMIRX_PLANE_CBCR		1
 
-static int debug = 0;
-static int low_latency = 0;
-
 static const struct v4l2_dv_timings_cap hdmirx_timings_cap = {
 	.type = V4L2_DV_BT_656_1120,
 	.reserved = { 0 },
