@@ -84,11 +84,18 @@ static u32 hdmirx_audio_fs(struct rk_hdmirx_dev *hdmirx_dev)
 	u32 acr_pb7_4, acr_pb3_0;
 
 	tmdsqpclk_freq = hdmirx_readl(hdmirx_dev, CMU_TMDSQPCLK_FREQ);
+	/* dummy read of PH2_1 latches the PB snapshot registers */
 	hdmirx_readl(hdmirx_dev, PKTDEC_ACR_PH2_1);
-	acr_pb7_4 = hdmirx_readl(hdmirx_dev, PKTDEC_ACR_PB3_0);
-	acr_pb3_0 = hdmirx_readl(hdmirx_dev, PKTDEC_ACR_PB7_4);
-	acr_cts = __be32_to_cpu(acr_pb7_4) & 0xfffff;
-	acr_n = (__be32_to_cpu(acr_pb3_0) & 0x0fffff00) >> 8;
+	/*
+	 * In the Audio Clock Regeneration packet CTS lives in PB1..PB3 and N
+	 * in PB4..PB6. After byte-swapping each register to CPU order, CTS is
+	 * the low 20 bits of the PB3_0 word and N is bits [27:8] of the PB7_4
+	 * word.
+	 */
+	acr_pb3_0 = hdmirx_readl(hdmirx_dev, PKTDEC_ACR_PB3_0);
+	acr_pb7_4 = hdmirx_readl(hdmirx_dev, PKTDEC_ACR_PB7_4);
+	acr_cts = __be32_to_cpu(acr_pb3_0) & 0xfffff;
+	acr_n = (__be32_to_cpu(acr_pb7_4) & 0x0fffff00) >> 8;
 	tmds_clk = tmdsqpclk_freq * 4 * 1000U;
 	if (acr_cts != 0) {
 		fs_audio = div_u64((tmds_clk * acr_n), acr_cts);
