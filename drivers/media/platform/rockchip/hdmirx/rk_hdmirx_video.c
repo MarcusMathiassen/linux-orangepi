@@ -337,7 +337,7 @@ static void dma_idle_int_handler(struct rk_hdmirx_dev *hdmirx_dev, bool *handled
 	struct v4l2_bt_timings *bt = &timings.bt;
 	struct vb2_v4l2_buffer *vb_done = NULL;
 
-	if (!(stream->irq_stat) && !(stream->irq_stat & LINE_FLAG_INT_EN))
+	if (!(stream->irq_stat & LINE_FLAG_INT_EN))
 		v4l2_dbg(1, debug, v4l2_dev, "%s: last time have no line_flag_irq\n", __func__);
 
 	if (!stream->next_buf) {
@@ -374,7 +374,7 @@ static void line_flag_int_handler(struct rk_hdmirx_dev *hdmirx_dev, bool *handle
 	struct vb2_v4l2_buffer *vb_done = NULL;
 
 	stream->line_flag_int_cnt++;
-	if (!(stream->irq_stat) && !(stream->irq_stat & HDMIRX_DMA_IDLE_INT))
+	if (!(stream->irq_stat & HDMIRX_DMA_IDLE_INT))
 		v4l2_info(v4l2_dev, "%s: last have no dma_idle_irq\n", __func__);
 
 	dma_cfg6 = hdmirx_readl(hdmirx_dev, DMA_CONFIG6);

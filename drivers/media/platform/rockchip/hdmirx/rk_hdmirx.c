@@ -539,8 +539,8 @@ static void hdmirx_phy_config(struct rk_hdmirx_dev *hdmirx_dev)
 
 	hdmirx_update_bits(hdmirx_dev, PHY_CONFIG, HDMI_DISABLE, 0);
 	if (wait_reg_bit_status(hdmirx_dev, PHY_STATUS, HDMI_DISABLE_ACK, 0,
-				false, 50));
-		//dev_err(dev, "%s wait hdmi disable ack failed!\n", __func__);
+				false, 50))
+		dev_dbg(dev, "%s wait hdmi disable ack failed!\n", __func__);
 
 	hdmirx_tmds_clk_ratio_config(hdmirx_dev);
 }
