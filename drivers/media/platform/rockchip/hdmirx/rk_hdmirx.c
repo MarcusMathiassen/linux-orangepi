@@ -2428,10 +2428,29 @@ static int hdmirx_remove(struct platform_device *pdev)
 
 	debugfs_remove_recursive(hdmirx_dev->debugfs_dir);
 	cpu_latency_qos_remove_request(&hdmirx_dev->pm_qos);
-	cancel_delayed_work(&hdmirx_dev->delayed_work_hotplug);
-	cancel_delayed_work(&hdmirx_dev->delayed_work_res_change);
-	cancel_delayed_work(&hdmirx_dev->delayed_work_audio);
-	cancel_delayed_work(&hdmirx_dev->delayed_work_cec);
+
+	/*
+	 * Stop the interrupt sources before tearing anything down, then wait
+	 * for any in-flight work to finish so it cannot touch registers after
+	 * the clocks are gated below.
+	 */
+	disable_irq(hdmirx_dev->hdmi_irq);
+	disable_irq(hdmirx_dev->dma_irq);
+	disable_irq(hdmirx_dev->det_irq);
+	sip_fiq_control(RK_SIP_FIQ_CTRL_FIQ_DIS, RK_IRQ_HDMIRX_HDMI, 0);
+
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_audio);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_heartbeat);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_cec);
+	flush_work(&hdmirx_dev->work_wdt_config);
+	sip_wdt_config(WDT_STOP, 0, 0, 0);
+
+	irq_set_affinity_hint(hdmirx_dev->hdmi_irq, NULL);
+	irq_set_affinity_hint(hdmirx_dev->dma_irq, NULL);
+	irq_set_affinity_hint(hdmirx_dev->det_irq, NULL);
+
 	clk_bulk_disable_unprepare(hdmirx_dev->num_clks, hdmirx_dev->clks);
 	reset_control_assert(hdmirx_dev->rst_a);
 	reset_control_assert(hdmirx_dev->rst_p);
