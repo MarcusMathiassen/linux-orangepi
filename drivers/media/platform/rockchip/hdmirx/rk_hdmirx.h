@@ -653,6 +653,7 @@ struct rk_hdmirx_dev {
 	struct work_struct work_wdt_config;
 	struct delayed_work delayed_work_hotplug;
 	struct delayed_work delayed_work_res_change;
+	struct delayed_work delayed_work_signal_check;
 	struct delayed_work delayed_work_audio;
 	struct delayed_work delayed_work_heartbeat;
 	struct delayed_work delayed_work_cec;

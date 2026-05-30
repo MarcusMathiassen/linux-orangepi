@@ -63,6 +63,11 @@ bool low_latency;
 module_param(low_latency, bool, 0644);
 MODULE_PARM_DESC(low_latency, "low_latency en(0-1)");
 
+static int signal_debounce_ms = 50;
+module_param(signal_debounce_ms, int, 0644);
+MODULE_PARM_DESC(signal_debounce_ms,
+	"re-validate a transient signal change before tearing down, in ms (0 = tear down immediately)");
+
 static const unsigned int hdmirx_extcon_cable[] = {
 	EXTCON_JACK_VIDEO_IN,
 	EXTCON_NONE,
@@ -798,6 +803,88 @@ void process_signal_change(struct rk_hdmirx_dev *hdmirx_dev)
 			msecs_to_jiffies(1000));
 }
 
+/* Interrupt sources that flap when a high-rate TMDS lock is marginal. */
+#define HDMIRX_SIGNAL_CHANGE_MU0	(TMDSQPCLK_OFF_CHG | TMDSQPCLK_LOCKED_CHG)
+#define HDMIRX_SIGNAL_CHANGE_MU2	(TMDSVALID_STABLE_CHG)
+#define HDMIRX_SIGNAL_CHANGE_AVP1	(VMON_VMEAS_IRQ | VMON_HMEAS_IRQ)
+
+static bool hdmirx_signal_locked(struct rk_hdmirx_dev *hdmirx_dev)
+{
+	u32 mu_status = hdmirx_readl(hdmirx_dev, MAINUNIT_STATUS);
+	u32 dma_st10 = hdmirx_readl(hdmirx_dev, DMA_STATUS10);
+	u32 cmu_st = hdmirx_readl(hdmirx_dev, CMU_STATUS);
+
+	return (mu_status & TMDSVALID_STABLE_ST) &&
+	       (dma_st10 & HDMIRX_LOCK) &&
+	       (cmu_st & TMDSQPCLK_LOCKED_ST);
+}
+
+/*
+ * A momentary glitch on a marginal high-rate (>3.4 Gbps) TMDS link should not
+ * trigger the full process_signal_change() teardown + 1s re-acquire, which
+ * turns a sub-frame blip into a long outage and, when the re-acquired lock is
+ * also marginal, a continuous teardown/re-lock storm.
+ *
+ * Instead, mask the flap-prone change interrupts and re-check the lock after a
+ * short delay: if it is still locked it was a glitch and we just re-arm the
+ * interrupts; only a genuine loss falls through to process_signal_change().
+ * signal_debounce_ms == 0 restores the original immediate-teardown behaviour.
+ */
+static void hdmirx_signal_change_handle(struct rk_hdmirx_dev *hdmirx_dev)
+{
+	if (signal_debounce_ms <= 0) {
+		process_signal_change(hdmirx_dev);
+		return;
+	}
+
+	hdmirx_update_bits(hdmirx_dev, MAINUNIT_0_INT_MASK_N,
+			   HDMIRX_SIGNAL_CHANGE_MU0, 0);
+	hdmirx_update_bits(hdmirx_dev, MAINUNIT_2_INT_MASK_N,
+			   HDMIRX_SIGNAL_CHANGE_MU2, 0);
+	hdmirx_update_bits(hdmirx_dev, AVPUNIT_1_INT_MASK_N,
+			   HDMIRX_SIGNAL_CHANGE_AVP1, 0);
+
+	schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+				 &hdmirx_dev->delayed_work_signal_check,
+				 msecs_to_jiffies(signal_debounce_ms));
+}
+
+static void hdmirx_delayed_work_signal_check(struct work_struct *work)
+{
+	struct delayed_work *dwork = to_delayed_work(work);
+	struct rk_hdmirx_dev *hdmirx_dev = container_of(dwork,
+			struct rk_hdmirx_dev, delayed_work_signal_check);
+	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
+
+	mutex_lock(&hdmirx_dev->work_lock);
+
+	/* Already torn down (or never up) elsewhere - nothing to debounce. */
+	if (!hdmirx_dev->get_timing) {
+		mutex_unlock(&hdmirx_dev->work_lock);
+		return;
+	}
+
+	if (!tx_5v_power_present(hdmirx_dev) || !hdmirx_signal_locked(hdmirx_dev)) {
+		v4l2_dbg(1, debug, v4l2_dev,
+			 "%s: signal loss confirmed, tearing down\n", __func__);
+		process_signal_change(hdmirx_dev);
+	} else {
+		v4l2_dbg(1, debug, v4l2_dev,
+			 "%s: transient glitch, lock retained\n", __func__);
+		hdmirx_clear_interrupt(hdmirx_dev, MAINUNIT_0_INT_CLEAR, 0xffffffff);
+		hdmirx_clear_interrupt(hdmirx_dev, MAINUNIT_2_INT_CLEAR, 0xffffffff);
+		hdmirx_clear_interrupt(hdmirx_dev, AVPUNIT_1_INT_CLEAR, 0xffffffff);
+		hdmirx_update_bits(hdmirx_dev, MAINUNIT_0_INT_MASK_N,
+				   HDMIRX_SIGNAL_CHANGE_MU0, HDMIRX_SIGNAL_CHANGE_MU0);
+		hdmirx_update_bits(hdmirx_dev, MAINUNIT_2_INT_MASK_N,
+				   HDMIRX_SIGNAL_CHANGE_MU2, HDMIRX_SIGNAL_CHANGE_MU2);
+		hdmirx_update_bits(hdmirx_dev, AVPUNIT_1_INT_MASK_N,
+				   HDMIRX_SIGNAL_CHANGE_AVP1, HDMIRX_SIGNAL_CHANGE_AVP1);
+	}
+
+	mutex_unlock(&hdmirx_dev->work_lock);
+}
+
 static void avpunit_0_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 				  int status, bool *handled)
 {
@@ -821,7 +908,7 @@ static void avpunit_1_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
 
 	if (status & (VMON_VMEAS_IRQ | VMON_HMEAS_IRQ)) {
-		process_signal_change(hdmirx_dev);
+		hdmirx_signal_change_handle(hdmirx_dev);
 		v4l2_dbg(2, debug, v4l2_dev, "%s: avp1_st:%#x\n",
 				__func__, status);
 		*handled = true;
@@ -855,13 +942,13 @@ static void mainunit_0_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 	}
 
 	if (status & TMDSQPCLK_OFF_CHG) {
-		process_signal_change(hdmirx_dev);
+		hdmirx_signal_change_handle(hdmirx_dev);
 		v4l2_dbg(2, debug, v4l2_dev, "%s: TMDSQPCLK_OFF_CHG\n", __func__);
 		*handled = true;
 	}
 
 	if (status & TMDSQPCLK_LOCKED_CHG) {
-		process_signal_change(hdmirx_dev);
+		hdmirx_signal_change_handle(hdmirx_dev);
 		v4l2_dbg(2, debug, v4l2_dev, "%s: TMDSQPCLK_LOCKED_CHG\n", __func__);
 		*handled = true;
 	}
@@ -891,7 +978,7 @@ static void mainunit_2_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 	}
 
 	if (status & TMDSVALID_STABLE_CHG) {
-		process_signal_change(hdmirx_dev);
+		hdmirx_signal_change_handle(hdmirx_dev);
 		v4l2_dbg(2, debug, v4l2_dev, "%s: TMDSVALID_STABLE_CHG\n", __func__);
 		*handled = true;
 	}
@@ -1142,6 +1229,7 @@ void hdmirx_plugout(struct rk_hdmirx_dev *hdmirx_dev)
 			HDMI_DISABLE);
 	hdmirx_writel(hdmirx_dev, PHYCREG_CONFIG0, 0x0);
 	cancel_delayed_work(&hdmirx_dev->delayed_work_res_change);
+	cancel_delayed_work(&hdmirx_dev->delayed_work_signal_check);
 	cancel_delayed_work(&hdmirx_dev->delayed_work_audio);
 	cpu_latency_qos_update_request(&hdmirx_dev->pm_qos, PM_QOS_DEFAULT_VALUE);
 	hdmirx_cancel_cpu_limit_freq(hdmirx_dev);
@@ -1432,6 +1520,7 @@ static int hdmirx_runtime_suspend(struct device *dev)
 
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_signal_check);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_audio);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_heartbeat);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_cec);
@@ -2211,6 +2300,7 @@ static int hdmirx_probe(struct platform_device *pdev)
 	INIT_WORK(&hdmirx_dev->work_wdt_config, hdmirx_work_wdt_config);
 	INIT_DELAYED_WORK(&hdmirx_dev->delayed_work_hotplug, hdmirx_delayed_work_hotplug);
 	INIT_DELAYED_WORK(&hdmirx_dev->delayed_work_res_change, hdmirx_delayed_work_res_change);
+	INIT_DELAYED_WORK(&hdmirx_dev->delayed_work_signal_check, hdmirx_delayed_work_signal_check);
 	INIT_DELAYED_WORK(&hdmirx_dev->delayed_work_audio, hdmirx_delayed_work_audio);
 	INIT_DELAYED_WORK(&hdmirx_dev->delayed_work_heartbeat, hdmirx_delayed_work_heartbeat);
 	INIT_DELAYED_WORK(&hdmirx_dev->delayed_work_cec, hdmirx_delayed_work_cec);
@@ -2427,6 +2517,7 @@ static int hdmirx_remove(struct platform_device *pdev)
 
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_signal_check);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_audio);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_heartbeat);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_cec);
