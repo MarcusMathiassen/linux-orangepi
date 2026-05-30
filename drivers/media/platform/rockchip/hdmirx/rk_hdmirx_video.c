@@ -345,8 +345,8 @@ static void dma_idle_int_handler(struct rk_hdmirx_dev *hdmirx_dev, bool *handled
 		goto DMA_IDLE_OUT;
 	}
 
-	vb_done = &stream->curr_buf->vb;
-	if (vb_done) {
+	if (stream->curr_buf) {
+		vb_done = &stream->curr_buf->vb;
 		vb_done->vb2_buf.timestamp = ktime_get_ns();
 		vb_done->sequence = stream->frame_idx;
 		/* config userbits 0 or 0xffffffff as invalid fence_fd*/
