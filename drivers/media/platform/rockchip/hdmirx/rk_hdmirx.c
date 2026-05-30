@@ -416,10 +416,9 @@ static int wait_reg_bit_status(struct rk_hdmirx_dev *hdmirx_dev,
 static int hdmirx_phy_register_read(struct rk_hdmirx_dev *hdmirx_dev,
 		u32 phy_reg, u32 *val)
 {
-	u32 i;
 	struct device *dev = hdmirx_dev->dev;
 
-	hdmirx_dev->cr_read_done = false;
+	reinit_completion(&hdmirx_dev->cr_done);
 	/* clear irq status */
 	hdmirx_clear_interrupt(hdmirx_dev, MAINUNIT_2_INT_CLEAR, 0xffffffff);
 	/* en irq */
@@ -430,15 +429,10 @@ static int hdmirx_phy_register_read(struct rk_hdmirx_dev *hdmirx_dev,
 	/* config read enable */
 	hdmirx_writel(hdmirx_dev, PHYCREG_CONTROL, PHYCREG_CR_PARA_READ_P);
 
-	for (i = 0; i < WAIT_PHY_REG_TIME; i++) {
-		usleep_range(200, 210);
-		if (hdmirx_dev->cr_read_done)
-			break;
-	}
-
-	if (i == WAIT_PHY_REG_TIME) {
+	if (!wait_for_completion_timeout(&hdmirx_dev->cr_done,
+					 msecs_to_jiffies(WAIT_CR_DONE_MS))) {
 		dev_err(dev, "%s wait cr read done failed!\n", __func__);
-		return -1;
+		return -ETIMEDOUT;
 	}
 
 	/* read phy reg val */
@@ -450,10 +444,9 @@ static int hdmirx_phy_register_read(struct rk_hdmirx_dev *hdmirx_dev,
 static int hdmirx_phy_register_write(struct rk_hdmirx_dev *hdmirx_dev,
 		u32 phy_reg, u32 val)
 {
-	u32 i;
 	struct device *dev = hdmirx_dev->dev;
 
-	hdmirx_dev->cr_write_done = false;
+	reinit_completion(&hdmirx_dev->cr_done);
 	/* clear irq status */
 	hdmirx_clear_interrupt(hdmirx_dev, MAINUNIT_2_INT_CLEAR, 0xffffffff);
 	/* en irq */
@@ -466,15 +459,10 @@ static int hdmirx_phy_register_write(struct rk_hdmirx_dev *hdmirx_dev,
 	/* config write enable */
 	hdmirx_writel(hdmirx_dev, PHYCREG_CONTROL, PHYCREG_CR_PARA_WRITE_P);
 
-	for (i = 0; i < WAIT_PHY_REG_TIME; i++) {
-		usleep_range(200, 210);
-		if (hdmirx_dev->cr_write_done)
-			break;
-	}
-
-	if (i == WAIT_PHY_REG_TIME) {
+	if (!wait_for_completion_timeout(&hdmirx_dev->cr_done,
+					 msecs_to_jiffies(WAIT_CR_DONE_MS))) {
 		dev_err(dev, "%s wait cr write done failed!\n", __func__);
-		return -1;
+		return -ETIMEDOUT;
 	}
 
 	return 0;
@@ -956,14 +944,14 @@ static void mainunit_2_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 	if (status & PHYCREG_CR_WRITE_DONE) {
 		hdmirx_update_bits(hdmirx_dev, MAINUNIT_2_INT_MASK_N,
 				   PHYCREG_CR_WRITE_DONE, 0);
-		hdmirx_dev->cr_write_done = true;
+		complete(&hdmirx_dev->cr_done);
 		*handled = true;
 	}
 
 	if (status & PHYCREG_CR_READ_DONE) {
 		hdmirx_update_bits(hdmirx_dev, MAINUNIT_2_INT_MASK_N,
 				   PHYCREG_CR_READ_DONE, 0);
-		hdmirx_dev->cr_read_done = true;
+		complete(&hdmirx_dev->cr_done);
 		*handled = true;
 	}
 
@@ -2283,6 +2271,7 @@ static int hdmirx_probe(struct platform_device *pdev)
 
 	mutex_init(&hdmirx_dev->stream_lock);
 	mutex_init(&hdmirx_dev->work_lock);
+	init_completion(&hdmirx_dev->cr_done);
 	spin_lock_init(&hdmirx_dev->rst_lock);
 	spin_lock_init(&hdmirx_dev->fence_lock);
 	INIT_LIST_HEAD(&hdmirx_dev->qbuf_fence_list_head);

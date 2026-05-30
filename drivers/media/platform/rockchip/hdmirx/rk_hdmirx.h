@@ -10,6 +10,7 @@
 
 #include <linux/bitops.h>
 #include <linux/clk.h>
+#include <linux/completion.h>
 #include <linux/cpufreq.h>
 #include <linux/debugfs.h>
 #include <linux/delay.h>
@@ -525,6 +526,7 @@
 #define RK_IRQ_HDMIRX_HDMI		210
 #define CPU_LIMIT_FREQ_KHZ		1200000
 #define WAIT_PHY_REG_TIME		50
+#define WAIT_CR_DONE_MS			50
 #define WAIT_TIMER_LOCK_TIME		50
 #define WAIT_SIGNAL_LOCK_TIME		600 /* if 5V present: 7ms each time */
 #define NO_LOCK_CFG_RETRY_TIME		300
@@ -685,8 +687,7 @@ struct rk_hdmirx_dev {
 	int det_irq;
 	enum hdmirx_pix_fmt pix_fmt;
 	bool avi_pkt_rcv;
-	bool cr_write_done;
-	bool cr_read_done;
+	struct completion cr_done;
 	bool timer_base_lock;
 	bool tmds_clk_ratio;
 	bool is_dvi_mode;
