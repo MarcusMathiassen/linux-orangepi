@@ -1280,16 +1280,17 @@ void hdmirx_get_color_range(struct rk_hdmirx_dev *hdmirx_dev)
 	hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PH2_1);
 	val = hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PB3_0);
 	color_range = (val & RGB_QUANTIZATION_RANGE) >> 26;
-	if (hdmirx_dev->pix_fmt != HDMIRX_RGB888) {
+	if (hdmirx_dev->pix_fmt != HDMIRX_RGB888 ||
+	    color_range != HDMIRX_DEFAULT_RANGE) {
 		hdmirx_dev->cur_color_range = color_range;
 	} else {
-		if (color_range != HDMIRX_DEFAULT_RANGE) {
-			hdmirx_dev->cur_color_range = color_range;
-		} else {
-			(hdmirx_dev->cur_vic) ?
-			(hdmirx_dev->cur_color_range = HDMIRX_LIMIT_RANGE) :
-			(hdmirx_dev->cur_color_range = HDMIRX_FULL_RANGE);
-		}
+		/*
+		 * RGB with no explicit quantization range: CE video modes
+		 * (non-zero VIC) default to limited range, IT formats (VIC 0)
+		 * to full range, per CEA-861.
+		 */
+		hdmirx_dev->cur_color_range = hdmirx_dev->cur_vic ?
+			HDMIRX_LIMIT_RANGE : HDMIRX_FULL_RANGE;
 	}
 
 	v4l2_dbg(2, debug, v4l2_dev, "%s: color_range: %s\n", __func__,

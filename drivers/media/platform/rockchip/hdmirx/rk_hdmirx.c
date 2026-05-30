@@ -614,26 +614,32 @@ static void hdmirx_controller_init(struct rk_hdmirx_dev *hdmirx_dev)
 
 static enum ddr_store_fmt get_store_fmt(struct rk_hdmirx_dev *hdmirx_dev)
 {
-	switch (hdmirx_dev->pix_fmt)
-	{
-		case HDMIRX_RGB888: return STORE_RGB888;
-		case HDMIRX_YUV444: return STORE_YUV444_8BIT;
-		case HDMIRX_YUV422: return STORE_YUV422_8BIT;
-		case HDMIRX_YUV420: return STORE_YUV420_8BIT;
-		default:
-			u32 dma_cfg1 = hdmirx_readl(hdmirx_dev, DMA_CONFIG1);
-			v4l2_dbg(1, debug, &hdmirx_dev->v4l2_dev, "unhandled pixfmt %d\n", hdmirx_dev->pix_fmt);
-			break;
+	switch (hdmirx_dev->pix_fmt) {
+	case HDMIRX_RGB888:
+		return STORE_RGB888;
+	case HDMIRX_YUV444:
+		return STORE_YUV444_8BIT;
+	case HDMIRX_YUV422:
+		return STORE_YUV422_8BIT;
+	case HDMIRX_YUV420:
+		return STORE_YUV420_8BIT;
+	default:
+		v4l2_dbg(1, debug, &hdmirx_dev->v4l2_dev,
+			 "unhandled pixfmt %d\n", hdmirx_dev->pix_fmt);
+		return STORE_RGB888;
 	}
-	return STORE_RGB888;
 }
+
 static void hdmirx_set_ddr_store_fmt(struct rk_hdmirx_dev *hdmirx_dev)
 {
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
 	enum ddr_store_fmt store_fmt = get_store_fmt(hdmirx_dev);
-	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG1, DDR_STORE_FORMAT_MASK, DDR_STORE_FORMAT(store_fmt));
-	u32 dma_cfg1 = hdmirx_readl(hdmirx_dev, DMA_CONFIG1);
-	v4l2_dbg(1, debug, v4l2_dev, "%s: pix_fmt: %s, DMA_CONFIG1:%#x\n", __func__, pix_fmt_str[hdmirx_dev->pix_fmt], dma_cfg1);
+
+	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG1, DDR_STORE_FORMAT_MASK,
+			   DDR_STORE_FORMAT(store_fmt));
+	v4l2_dbg(1, debug, v4l2_dev, "%s: pix_fmt: %s, DMA_CONFIG1:%#x\n",
+		 __func__, pix_fmt_str[hdmirx_dev->pix_fmt],
+		 hdmirx_readl(hdmirx_dev, DMA_CONFIG1));
 }
 
 static int hdmirx_wait_lock_and_get_timing(struct rk_hdmirx_dev *hdmirx_dev)
