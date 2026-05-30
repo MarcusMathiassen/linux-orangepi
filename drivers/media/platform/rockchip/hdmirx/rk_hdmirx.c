@@ -639,18 +639,10 @@ static void hdmirx_set_ddr_store_fmt(struct rk_hdmirx_dev *hdmirx_dev)
 static int hdmirx_wait_lock_and_get_timing(struct rk_hdmirx_dev *hdmirx_dev)
 {
 	u32 i, j = 0;
-	u32 mu_status, scdc_status, dma_st10, cmu_st;
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
 
 	for (i = 1; i < WAIT_SIGNAL_LOCK_TIME; i++) {
-		mu_status = hdmirx_readl(hdmirx_dev, MAINUNIT_STATUS);
-		scdc_status = hdmirx_readl(hdmirx_dev, SCDC_REGBANK_STATUS3);
-		dma_st10 = hdmirx_readl(hdmirx_dev, DMA_STATUS10);
-		cmu_st = hdmirx_readl(hdmirx_dev, CMU_STATUS);
-
-		if ((mu_status & TMDSVALID_STABLE_ST) &&
-				(dma_st10 & HDMIRX_LOCK) &&
-				(cmu_st & TMDSQPCLK_LOCKED_ST))
+		if (hdmirx_signal_locked(hdmirx_dev))
 			j++;
 		else
 			j = 0;
@@ -673,7 +665,10 @@ static int hdmirx_wait_lock_and_get_timing(struct rk_hdmirx_dev *hdmirx_dev)
 		v4l2_err(v4l2_dev, "%s signal not lock, tmds_clk_ratio:%d\n",
 				__func__, hdmirx_dev->tmds_clk_ratio);
 		v4l2_err(v4l2_dev, "%s mu_st:%#x, scdc_st:%#x, dma_st10:%#x\n",
-				__func__, mu_status, scdc_status, dma_st10);
+				__func__,
+				hdmirx_readl(hdmirx_dev, MAINUNIT_STATUS),
+				hdmirx_readl(hdmirx_dev, SCDC_REGBANK_STATUS3),
+				hdmirx_readl(hdmirx_dev, DMA_STATUS10));
 
 		return -1;
 	}
@@ -808,7 +803,7 @@ void process_signal_change(struct rk_hdmirx_dev *hdmirx_dev)
 #define HDMIRX_SIGNAL_CHANGE_MU2	(TMDSVALID_STABLE_CHG)
 #define HDMIRX_SIGNAL_CHANGE_AVP1	(VMON_VMEAS_IRQ | VMON_HMEAS_IRQ)
 
-static bool hdmirx_signal_locked(struct rk_hdmirx_dev *hdmirx_dev)
+bool hdmirx_signal_locked(struct rk_hdmirx_dev *hdmirx_dev)
 {
 	u32 mu_status = hdmirx_readl(hdmirx_dev, MAINUNIT_STATUS);
 	u32 dma_st10 = hdmirx_readl(hdmirx_dev, DMA_STATUS10);

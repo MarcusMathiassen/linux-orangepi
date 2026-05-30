@@ -101,18 +101,7 @@ static bool port_no_link(struct rk_hdmirx_dev *hdmirx_dev)
 
 static bool signal_not_lock(struct rk_hdmirx_dev *hdmirx_dev)
 {
-	u32 mu_status, dma_st10, cmu_st;
-
-	mu_status = hdmirx_readl(hdmirx_dev, MAINUNIT_STATUS);
-	dma_st10 = hdmirx_readl(hdmirx_dev, DMA_STATUS10);
-	cmu_st = hdmirx_readl(hdmirx_dev, CMU_STATUS);
-
-	if ((mu_status & TMDSVALID_STABLE_ST) &&
-	    (dma_st10 & HDMIRX_LOCK) &&
-	    (cmu_st & TMDSQPCLK_LOCKED_ST))
-		return false;
-
-	return true;
+	return !hdmirx_signal_locked(hdmirx_dev);
 }
 
 /*

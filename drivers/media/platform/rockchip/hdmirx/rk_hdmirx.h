@@ -728,6 +728,7 @@ void hdmirx_update_bits(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 mask, u32
 void hdmirx_hpd_config(struct rk_hdmirx_dev *hdmirx_dev, bool en);
 
 bool tx_5v_power_present(struct rk_hdmirx_dev *hdmirx_dev);
+bool hdmirx_signal_locked(struct rk_hdmirx_dev *hdmirx_dev);
 void hdmirx_plugout(struct rk_hdmirx_dev *hdmirx_dev);
 void process_signal_change(struct rk_hdmirx_dev *hdmirx_dev);
 
