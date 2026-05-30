@@ -904,9 +904,10 @@ static void pkt_0_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 	u32 pre_color_space = hdmirx_dev->cur_color_space;
 
 	if ((status & PKTDEC_AVIIF_CHG_IRQ)) {
+		/* pix_fmt first: hdmirx_get_color_range() reads it */
+		hdmirx_get_pix_fmt(hdmirx_dev);
 		hdmirx_get_color_range(hdmirx_dev);
 		hdmirx_get_color_space(hdmirx_dev);
-		hdmirx_get_pix_fmt(hdmirx_dev);
 		if (hdmirx_dev->cur_fmt_fourcc != pre_fmt_fourcc ||
 		    hdmirx_dev->cur_color_range != pre_color_range ||
 		    hdmirx_dev->cur_color_space != pre_color_space) {
