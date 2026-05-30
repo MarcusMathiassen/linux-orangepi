@@ -737,8 +737,10 @@ static int hdmirx_get_hdcp_auth_status(struct rk_hdmirx_dev *hdmirx_dev)
 {
 	u32 val;
 
+	val = hdmirx_readl(hdmirx_dev, HDCP2_ESM_P0_GPIO_OUT) & BIT(2);
+	if (val)
+		return 1;
 	hdmirx_clear_interrupt(hdmirx_dev, HDCP_INT_CLEAR, 0xffffffff);
-	msleep(200);
 	val = hdmirx_readl(hdmirx_dev, HDCP_INT_STATUS) & 0x40;
 
 	return val ? 1 : 0;
@@ -1031,9 +1033,10 @@ static void hdmirx_add_fence_to_vb_done(struct hdmirx_stream *stream,
 
 	if (vb_fence) {
 		/*  pass the fence_fd to userspace through timecode.userbits */
-		if (put_user(vb_fence->fence_fd, vb_done->timecode.userbits))
-			v4l2_err(v4l2_dev, "%s: failed to trans fence fd!\n", __func__);
-
+		vb_done->timecode.userbits[0] = vb_fence->fence_fd & 0xff;
+		vb_done->timecode.userbits[1] = (vb_fence->fence_fd & 0xff00) >> 8;
+		vb_done->timecode.userbits[2] = (vb_fence->fence_fd & 0xff0000) >> 16;
+		vb_done->timecode.userbits[3] = (vb_fence->fence_fd & 0xff000000) >> 24;
 		v4l2_dbg(3, debug, v4l2_dev, "%s: fence:%p, fence_fd:%d\n",
 			 __func__, vb_fence->fence, vb_fence->fence_fd);
 	} else {
@@ -1797,9 +1800,12 @@ hdmirx_ctrl_write(struct file *file, const char __user *buf,
 	u32 i;
 	bool write_en = false;
 
+	if (count >= sizeof(kbuf))
+		return -EINVAL;
 	if (copy_from_user(kbuf, buf, count))
 		return -EFAULT;
-	if (sscanf(kbuf, "%x%x", &reg, &val) == -1)
+	kbuf[count] = '\0';
+	if (sscanf(kbuf, "%x %x", &reg, &val) != 2)
 		return -EFAULT;
 	for (i = 0; i < ARRAY_SIZE(hdmirx_ctrl_table); i++) {
 		if (reg >= hdmirx_ctrl_table[i].reg_base &&
@@ -1886,9 +1892,12 @@ hdmirx_phy_write(struct file *file, const char __user *buf,
 	u32 reg, val;
 	char kbuf[25];
 
+	if (count >= sizeof(kbuf))
+		return -EINVAL;
 	if (copy_from_user(kbuf, buf, count))
 		return -EFAULT;
-	if (sscanf(kbuf, "%x%x", &reg, &val) == -1)
+	kbuf[count] = '\0';
+	if (sscanf(kbuf, "%x %x", &reg, &val) != 2)
 		return -EFAULT;
 	if (reg > RAWLANE3_DIG_AON_FAST_FLAGS) {
 		dev_err(hdmirx_dev->dev, "it is no a hdmirx register\n");
