@@ -1583,10 +1583,20 @@ static ssize_t edid_store(struct device *dev,
 		disable_irq(hdmirx_dev->dma_irq);
 		sip_fiq_control(RK_SIP_FIQ_CTRL_FIQ_DIS, RK_IRQ_HDMIRX_HDMI, 0);
 
+		/*
+		 * Flush any in-flight plug/res-change worker (they take
+		 * work_lock) before reconfiguring, then hold work_lock so the
+		 * plugout/EDID rewrite cannot race a worker re-arming the PHY.
+		 */
+		cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
+		cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
+
+		mutex_lock(&hdmirx_dev->work_lock);
 		if (tx_5v_power_present(hdmirx_dev))
 			hdmirx_plugout(hdmirx_dev);
 		hdmirx_dev->edid_version = edid;
 		hdmirx_edid_init_config(hdmirx_dev);
+		mutex_unlock(&hdmirx_dev->work_lock);
 
 		enable_irq(hdmirx_dev->hdmi_irq);
 		enable_irq(hdmirx_dev->dma_irq);
@@ -1620,19 +1630,21 @@ static ssize_t status_store(struct device *dev,
 	if (!hdmirx_dev)
 		return -EINVAL;
 
+	/* serialize HPD toggling against the plug/res-change workers */
+	mutex_lock(&hdmirx_dev->work_lock);
 	if (sysfs_streq(buf, "on")) {
 		hdmirx_dev->force_off = false;
-		if (!tx_5v_power_present(hdmirx_dev))
-			return count;
-		hdmirx_hpd_ctrl(hdmirx_dev, true);
+		if (tx_5v_power_present(hdmirx_dev))
+			hdmirx_hpd_ctrl(hdmirx_dev, true);
 	} else if (sysfs_streq(buf, "off")) {
 		hdmirx_dev->force_off = true;
-		if (!tx_5v_power_present(hdmirx_dev))
-			return count;
-		hdmirx_hpd_ctrl(hdmirx_dev, false);
+		if (tx_5v_power_present(hdmirx_dev))
+			hdmirx_hpd_ctrl(hdmirx_dev, false);
 	} else {
+		mutex_unlock(&hdmirx_dev->work_lock);
 		return -EINVAL;
 	}
+	mutex_unlock(&hdmirx_dev->work_lock);
 
 	return count;
 }

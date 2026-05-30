@@ -1581,10 +1581,20 @@ static int hdmirx_set_edid(struct file *file, void *fh,
 	disable_irq(hdmirx_dev->dma_irq);
 	sip_fiq_control(RK_SIP_FIQ_CTRL_FIQ_DIS, RK_IRQ_HDMIRX_HDMI, 0);
 
+	/*
+	 * Flush any in-flight plug/res-change worker (they take work_lock)
+	 * before reconfiguring, then hold work_lock so the plugout/EDID
+	 * rewrite cannot race a worker re-arming the PHY.
+	 */
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
+
+	mutex_lock(&hdmirx_dev->work_lock);
 	if (tx_5v_power_present(hdmirx_dev))
 		hdmirx_plugout(hdmirx_dev);
 	hdmirx_write_edid(hdmirx_dev, edid, false);
 	hdmirx_dev->edid_version = HDMIRX_EDID_USER;
+	mutex_unlock(&hdmirx_dev->work_lock);
 
 	enable_irq(hdmirx_dev->hdmi_irq);
 	enable_irq(hdmirx_dev->dma_irq);
