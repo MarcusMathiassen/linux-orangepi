@@ -118,90 +118,14 @@ static bool signal_not_lock(struct rk_hdmirx_dev *hdmirx_dev)
 	return true;
 }
 
-static const char *hdmirx_fence_get_name(struct dma_fence *fence)
-{
-	return RK_HDMIRX_DRVNAME;
-}
-
-static const struct dma_fence_ops hdmirx_fence_ops = {
-	.get_driver_name = hdmirx_fence_get_name,
-	.get_timeline_name = hdmirx_fence_get_name,
-};
-
-static struct dma_fence *hdmirx_dma_fence_alloc(struct hdmirx_fence_context *fence_ctx)
-{
-	struct dma_fence *fence = NULL;
-
-	if (fence_ctx == NULL) {
-		pr_err("fence_context is NULL!\n");
-		return ERR_PTR(-EINVAL);
-	}
-
-	fence = kzalloc(sizeof(*fence), GFP_KERNEL);
-	if (!fence)
-		return ERR_PTR(-ENOMEM);
-
-	dma_fence_init(fence, &hdmirx_fence_ops, &fence_ctx->spinlock,
-		       fence_ctx->context, ++fence_ctx->seqno);
-
-	return fence;
-}
-
-static int hdmirx_dma_fence_get_fd(struct dma_fence *fence)
-{
-	struct sync_file *sync_file = NULL;
-	int fence_fd = -1;
-
-	if (!fence)
-		return -EINVAL;
-
-	fence_fd = get_unused_fd_flags(O_CLOEXEC);
-	if (fence_fd < 0)
-		return fence_fd;
-
-	sync_file = sync_file_create(fence);
-	if (!sync_file) {
-		put_unused_fd(fence_fd);
-		return -ENOMEM;
-	}
-
-	fd_install(fence_fd, sync_file->file);
-
-	return fence_fd;
-}
-
-static void hdmirx_qbuf_alloc_fence(struct rk_hdmirx_dev *hdmirx_dev)
-{
-	struct dma_fence *fence;
-	int fence_fd;
-	struct hdmirx_fence *hdmirx_fence;
-	unsigned long lock_flags = 0;
-	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
-
-	fence = hdmirx_dma_fence_alloc(&hdmirx_dev->fence_ctx);
-	if (!IS_ERR(fence)) {
-		fence_fd = hdmirx_dma_fence_get_fd(fence);
-		if (fence_fd >= 0) {
-			hdmirx_fence = kzalloc(sizeof(struct hdmirx_fence), GFP_KERNEL);
-			if (!hdmirx_fence) {
-				v4l2_err(v4l2_dev, "%s: failed to alloc hdmirx_fence!\n", __func__);
-				return;
-			}
-			hdmirx_fence->fence = fence;
-			hdmirx_fence->fence_fd = fence_fd;
-			spin_lock_irqsave(&hdmirx_dev->fence_lock, lock_flags);
-			list_add_tail(&hdmirx_fence->fence_list, &hdmirx_dev->qbuf_fence_list_head);
-			spin_unlock_irqrestore(&hdmirx_dev->fence_lock, lock_flags);
-			v4l2_dbg(3, debug, v4l2_dev, "%s: fence:%p, fence_fd:%d\n",
-				 __func__, fence, fence_fd);
-		} else {
-			dma_fence_put(fence);
-			v4l2_err(v4l2_dev, "%s: failed to get fence fd!\n", __func__);
-		}
-	} else {
-		v4l2_err(v4l2_dev, "%s: alloc fence failed!\n", __func__);
-	}
-}
+/*
+ * The low-latency fence-delivery path (passing a per-qbuf sync_file fd to
+ * userspace via timecode.userbits) is unfinished: the consumer that would
+ * hand the fence to a completed buffer is not wired up. Allocating fences
+ * on qbuf without a consumer leaked an fd and a sync_file every frame, so
+ * the allocation path has been removed. The signal/free helpers below are
+ * kept and operate as no-ops on the (now always empty) fence lists.
+ */
 
 static void hdmirx_free_fence(struct rk_hdmirx_dev *hdmirx_dev)
 {
@@ -608,9 +532,6 @@ static void hdmirx_buf_queue(struct vb2_buffer *vb)
 	spin_lock_irqsave(&stream->vbq_lock, lock_flags);
 	list_add_tail(&hdmirx_buf->queue, &stream->buf_head);
 	spin_unlock_irqrestore(&stream->vbq_lock, lock_flags);
-
-	if (low_latency)
-		hdmirx_qbuf_alloc_fence(hdmirx_dev);
 }
 
 static void hdmirx_stop_streaming(struct vb2_queue *queue)

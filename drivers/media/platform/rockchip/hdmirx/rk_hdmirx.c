@@ -1011,42 +1011,6 @@ static irqreturn_t hdmirx_hdmi_irq_handler(int irq, void *dev_id)
 	return handled ? IRQ_HANDLED : IRQ_NONE;
 }
 
-static void hdmirx_add_fence_to_vb_done(struct hdmirx_stream *stream,
-					struct vb2_v4l2_buffer *vb_done)
-{
-	unsigned long lock_flags = 0;
-	struct hdmirx_fence *vb_fence;
-	struct rk_hdmirx_dev *hdmirx_dev = stream->hdmirx_dev;
-	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
-
-	spin_lock_irqsave(&hdmirx_dev->fence_lock, lock_flags);
-	if (!list_empty(&hdmirx_dev->qbuf_fence_list_head)) {
-		vb_fence = list_first_entry(&hdmirx_dev->qbuf_fence_list_head,
-				struct hdmirx_fence, fence_list);
-		list_del(&vb_fence->fence_list);
-	} else {
-		vb_fence = NULL;
-	}
-
-	if (vb_fence)
-		list_add_tail(&vb_fence->fence_list, &hdmirx_dev->done_fence_list_head);
-	spin_unlock_irqrestore(&hdmirx_dev->fence_lock, lock_flags);
-
-	if (vb_fence) {
-		/*  pass the fence_fd to userspace through timecode.userbits */
-		vb_done->timecode.userbits[0] = vb_fence->fence_fd & 0xff;
-		vb_done->timecode.userbits[1] = (vb_fence->fence_fd & 0xff00) >> 8;
-		vb_done->timecode.userbits[2] = (vb_fence->fence_fd & 0xff0000) >> 16;
-		vb_done->timecode.userbits[3] = (vb_fence->fence_fd & 0xff000000) >> 24;
-		v4l2_dbg(3, debug, v4l2_dev, "%s: fence:%p, fence_fd:%d\n",
-			 __func__, vb_fence->fence, vb_fence->fence_fd);
-	} else {
-		/* config userbits 0 or 0xffffffff as invalid fence_fd*/
-		memset(vb_done->timecode.userbits, 0xff, sizeof(vb_done->timecode.userbits));
-		v4l2_err(v4l2_dev, "%s: failed to get fence fd!\n", __func__);
-	}
-}
-
 static void hdmirx_interrupts_setup(struct rk_hdmirx_dev *hdmirx_dev, bool en)
 {
 	struct v4l2_bt_timings *bt = &hdmirx_dev->timings.bt;
