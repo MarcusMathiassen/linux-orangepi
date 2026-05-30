@@ -1601,7 +1601,7 @@ static ssize_t audio_rate_show(struct device *dev,
 {
 	struct rk_hdmirx_dev *hdmirx_dev = dev_get_drvdata(dev);
 
-	return snprintf(buf, PAGE_SIZE, "%d", hdmirx_dev->audio_state.fs_audio);
+	return sysfs_emit(buf, "%d", hdmirx_dev->audio_state.fs_audio);
 }
 
 static ssize_t audio_present_show(struct device *dev,
@@ -1609,8 +1609,8 @@ static ssize_t audio_present_show(struct device *dev,
 {
 	struct rk_hdmirx_dev *hdmirx_dev = dev_get_drvdata(dev);
 
-	return snprintf(buf, PAGE_SIZE, "%d",
-			tx_5v_power_present(hdmirx_dev) ? hdmirx_dev->audio_present : 0);
+	return sysfs_emit(buf, "%d",
+			  tx_5v_power_present(hdmirx_dev) ? hdmirx_dev->audio_present : 0);
 }
 
 static ssize_t edid_show(struct device *dev,
@@ -1622,7 +1622,7 @@ static ssize_t edid_show(struct device *dev,
 	if (hdmirx_dev)
 		edid = hdmirx_dev->edid_version;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", edid);
+	return sysfs_emit(buf, "%d\n", edid);
 }
 
 static ssize_t edid_store(struct device *dev,
@@ -1680,8 +1680,8 @@ static ssize_t status_show(struct device *dev,
 	if (!hdmirx_dev)
 		return -EINVAL;
 
-	return snprintf(buf, PAGE_SIZE, "%s\n",
-			hdmirx_dev->hpd_on ? "connected" : "disconnected");
+	return sysfs_emit(buf, "%s\n",
+			  hdmirx_dev->hpd_on ? "connected" : "disconnected");
 }
 
 static ssize_t status_store(struct device *dev,

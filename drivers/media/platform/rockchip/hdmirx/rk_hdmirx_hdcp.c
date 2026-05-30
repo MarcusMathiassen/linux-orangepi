@@ -206,7 +206,7 @@ static ssize_t enable_show(struct device *device,
 	if (hdcp)
 		enable = hdcp->enable;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", enable);
+	return sysfs_emit(buf, "%d\n", enable);
 }
 
 static ssize_t enable_store(struct device *device,
@@ -259,21 +259,21 @@ static ssize_t status_show(struct device *device,
 		return 0;
 
 	if (!hdcp->enable)
-		return snprintf(buf, PAGE_SIZE, "HDCP Disable\n");
+		return sysfs_emit(buf, "HDCP Disable\n");
 
 	if (hdcp->enable == HDCP_2X_ENABLE) {
 		dectypt = hdmirx_hdcp_read(hdcp, HDCP2_STATUS) & BIT(0);
 		if (dectypt) {
 			val = hdmirx_hdcp_read(hdcp, HDCP2_ESM_P0_GPIO_OUT);
 			if (val & BIT(2))
-				n += snprintf(buf + n, PAGE_SIZE - n,
-					      "HDCP2.3: Authenticated success\n");
+				n += sysfs_emit_at(buf, n,
+						   "HDCP2.3: Authenticated success\n");
 			else
-				n += snprintf(buf + n, PAGE_SIZE - n,
-					      "HDCP2.3: Authenticated failed\n");
+				n += sysfs_emit_at(buf, n,
+						   "HDCP2.3: Authenticated failed\n");
 			return n;
 		}
-		n += snprintf(buf + n, PAGE_SIZE - n, "HDCP2.3: No dectypted\n");
+		n += sysfs_emit_at(buf, n, "HDCP2.3: No dectypted\n");
 	}
 
 	status = hdcp->status;
@@ -290,13 +290,13 @@ static ssize_t status_show(struct device *device,
 	}
 
 	if (status == HDMIRX_HDCP_AUTH_START)
-		n += snprintf(buf + n, PAGE_SIZE - n, "HDCP1.4: Authenticated start\n");
+		n += sysfs_emit_at(buf, n, "HDCP1.4: Authenticated start\n");
 	else if (status == HDMIRX_HDCP_AUTH_SUCCESS)
-		n += snprintf(buf + n, PAGE_SIZE - n, "HDCP1.4: Authenticated success\n");
+		n += sysfs_emit_at(buf, n, "HDCP1.4: Authenticated success\n");
 	else if (status == HDMIRX_HDCP_AUTH_FAIL)
-		n += snprintf(buf + n, PAGE_SIZE - n, "HDCP1.4: Authenticated failed\n");
+		n += sysfs_emit_at(buf, n, "HDCP1.4: Authenticated failed\n");
 	else
-		n += snprintf(buf + n, PAGE_SIZE - n, "HDCP1.4: Unknown status\n");
+		n += sysfs_emit_at(buf, n, "HDCP1.4: Unknown status\n");
 
 	return n;
 }
@@ -308,7 +308,7 @@ static ssize_t support_show(struct device *device,
 {
 	struct rk_hdmirx_hdcp *hdcp = g_hdmirx_hdcp;
 
-	return snprintf(buf, PAGE_SIZE, "%d\n", hdcp->hdcp_support);
+	return sysfs_emit(buf, "%d\n", hdcp->hdcp_support);
 }
 
 static DEVICE_ATTR_RO(support);
