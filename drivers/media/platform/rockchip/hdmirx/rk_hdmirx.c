@@ -1973,7 +1973,8 @@ static int hdmirx_status_show(struct seq_file *s, void *v)
 		vtot = bt->height + bt->vfrontporch + bt->vsync + bt->vbackporch;
 	}
 
-	fps = (bt->pixelclock + (htot * vtot) / 2) / (htot * vtot);
+	fps = (htot && vtot) ?
+		(bt->pixelclock + (htot * vtot) / 2) / (htot * vtot) : 0;
 
 	seq_puts(s, "Color Format: ");
 	if (hdmirx_dev->pix_fmt == HDMIRX_RGB888)

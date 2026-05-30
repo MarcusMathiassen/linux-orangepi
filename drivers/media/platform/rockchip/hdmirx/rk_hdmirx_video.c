@@ -1199,7 +1199,10 @@ static void hdmirx_get_timings(struct rk_hdmirx_dev *hdmirx_dev, struct v4l2_bt_
 	if (!from_dma)
 		hact = (hact * 24) / hdmirx_dev->color_depth;
 
-	fps = (bt->pixelclock + (htotal * vtotal) / 2) / (htotal * vtotal);
+	if (htotal && vtotal)
+		fps = (bt->pixelclock + (htotal * vtotal) / 2) / (htotal * vtotal);
+	else
+		fps = 0;
 	bt->width = hact;
 	bt->height = vact;
 	bt->hfrontporch = hfp;
