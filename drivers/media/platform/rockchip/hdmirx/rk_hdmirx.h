@@ -53,12 +53,9 @@
 #include <sound/hdmi-codec.h>
 #include <linux/rk_hdmirx_class.h>
 
-#include "rk_hdmirx.h"
 #include "rk_hdmirx_cec.h"
 #include "rk_hdmirx_hdcp.h"
 #include "rk_hdmirx_audio.h"
-
-#define EDID_BLOCK_SIZE			128
 
 #define UPDATE(x, h, l)		(((x) << (l)) & GENMASK((h), (l)))
 #define HIWORD_UPDATE(v, h, l)	(((v) << (l)) | (GENMASK((h), (l)) << 16))
@@ -538,7 +535,7 @@
 
 static char *hdmirx_color_space[8] = {
 	"xvYCC601", "xvYCC709", "sYCC601", "Adobe_YCC601",
-	"Adobe_RGB", "BT2020_YcCbcCrc", "BT2020_RGB_OR_YCbCr"
+	"Adobe_RGB", "BT2020_YcCbcCrc", "BT2020_RGB_OR_YCbCr", "Reserved"
 };
 
 enum hdmirx_pix_fmt {
