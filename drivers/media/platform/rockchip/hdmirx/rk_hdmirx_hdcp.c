@@ -273,7 +273,7 @@ static ssize_t status_show(struct device *device,
 					      "HDCP2.3: Authenticated failed\n");
 			return n;
 		}
-		n += snprintf(buf, PAGE_SIZE, "HDCP2.3: No dectypted\n");
+		n += snprintf(buf + n, PAGE_SIZE - n, "HDCP2.3: No dectypted\n");
 	}
 
 	status = hdcp->status;
@@ -290,13 +290,13 @@ static ssize_t status_show(struct device *device,
 	}
 
 	if (status == HDMIRX_HDCP_AUTH_START)
-		n += snprintf(buf + n, PAGE_SIZE, "HDCP1.4: Authenticated start\n");
+		n += snprintf(buf + n, PAGE_SIZE - n, "HDCP1.4: Authenticated start\n");
 	else if (status == HDMIRX_HDCP_AUTH_SUCCESS)
-		n += snprintf(buf + n, PAGE_SIZE, "HDCP1.4: Authenticated success\n");
+		n += snprintf(buf + n, PAGE_SIZE - n, "HDCP1.4: Authenticated success\n");
 	else if (status == HDMIRX_HDCP_AUTH_FAIL)
-		n += snprintf(buf + n, PAGE_SIZE, "HDCP1.4: Authenticated failed\n");
+		n += snprintf(buf + n, PAGE_SIZE - n, "HDCP1.4: Authenticated failed\n");
 	else
-		n += snprintf(buf + n, PAGE_SIZE, "HDCP1.4: Unknown status\n");
+		n += snprintf(buf + n, PAGE_SIZE - n, "HDCP1.4: Unknown status\n");
 
 	return n;
 }
