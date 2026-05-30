@@ -15,6 +15,7 @@
 #include <linux/fs.h>
 #include <linux/gpio/consumer.h>
 #include <linux/interrupt.h>
+#include <linux/iopoll.h>
 #include <linux/irq.h>
 #include <linux/math64.h>
 #include <linux/mfd/syscon.h>
@@ -400,28 +401,16 @@ static void hdmirx_scdc_init(struct rk_hdmirx_dev *hdmirx_dev)
 static int wait_reg_bit_status(struct rk_hdmirx_dev *hdmirx_dev,
 		u32 reg, u32 bit_mask, u32 expect_val, bool is_grf, u32 ms)
 {
-	u32 i, val;
-	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
+	u32 val;
 
-	for (i = 0; i < ms; i++) {
-		if (is_grf)
-			regmap_read(hdmirx_dev->grf, reg, &val);
-		else
-			val = hdmirx_readl(hdmirx_dev, reg);
+	if (is_grf)
+		return regmap_read_poll_timeout(hdmirx_dev->grf, reg, val,
+						(val & bit_mask) == expect_val,
+						1000, ms * 1000);
 
-		if ((val & bit_mask) == expect_val) {
-			v4l2_dbg(2, debug, v4l2_dev,
-				"%s:  i:%d, time: %dms\n", __func__, i, ms);
-			break;
-		}
-
-		usleep_range(1000, 1010);
-	}
-
-	if (i == ms)
-		return -1;
-
-	return 0;
+	return read_poll_timeout(hdmirx_readl, val,
+				 (val & bit_mask) == expect_val,
+				 1000, ms * 1000, false, hdmirx_dev, reg);
 }
 
 static int hdmirx_phy_register_read(struct rk_hdmirx_dev *hdmirx_dev,
