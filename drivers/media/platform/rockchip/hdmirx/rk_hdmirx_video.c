@@ -1404,12 +1404,15 @@ static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct 
 	val = hdmirx_readl(hdmirx_dev, DMA_STATUS11);
 	field_type = (val & HDMIRX_TYPE_MASK) >> 7;
 	hdmirx_get_pix_fmt(hdmirx_dev);
-	hdmirx_get_color_range(hdmirx_dev);
-	hdmirx_get_color_space(hdmirx_dev);
-	bt->interlaced = field_type & BIT(0) ? V4L2_DV_INTERLACED : V4L2_DV_PROGRESSIVE;
+	/* VIC must be read before color range: the RGB default-range
+	 * heuristic in hdmirx_get_color_range() depends on cur_vic.
+	 */
 	hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PH2_1);
 	val = hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PB7_4);
 	hdmirx_dev->cur_vic =  val & VIC_VAL_MASK;
+	hdmirx_get_color_range(hdmirx_dev);
+	hdmirx_get_color_space(hdmirx_dev);
+	bt->interlaced = field_type & BIT(0) ? V4L2_DV_INTERLACED : V4L2_DV_PROGRESSIVE;
 	hdmirx_get_colordepth(hdmirx_dev);
 	color_depth = hdmirx_dev->color_depth;
 	deframer_st = hdmirx_readl(hdmirx_dev, DEFRAMER_STATUS);
