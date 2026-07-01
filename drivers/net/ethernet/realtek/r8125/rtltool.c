@@ -5,7 +5,7 @@
 # r8125 is the Linux device driver released for Realtek 2.5 Gigabit Ethernet
 # controllers with PCI-Express interface.
 #
-# Copyright(c) 2024 Realtek Semiconductor Corp. All rights reserved.
+# Copyright(c) 2026 Realtek Semiconductor Corp. All rights reserved.
 #
 # This program is free software; you can redistribute it and/or modify it
 # under the terms of the GNU General Public License as published by the Free
@@ -47,6 +47,7 @@
 int rtl8125_tool_ioctl(struct rtl8125_private *tp, struct ifreq *ifr)
 {
         struct rtltool_cmd my_cmd;
+        unsigned long flags;
         int ret;
 
         if (copy_from_user(&my_cmd, ifr->ifr_data, sizeof(my_cmd)))
@@ -97,7 +98,9 @@ int rtl8125_tool_ioctl(struct rtl8125_private *tp, struct ifreq *ifr)
                 break;
 
         case RTLTOOL_READ_PHY:
+                r8125_spin_lock(&tp->phy_lock, flags);
                 my_cmd.data = rtl8125_mdio_prot_read(tp, my_cmd.offset);
+                r8125_spin_unlock(&tp->phy_lock, flags);
                 if (copy_to_user(ifr->ifr_data, &my_cmd, sizeof(my_cmd))) {
                         ret = -EFAULT;
                         break;
@@ -106,7 +109,9 @@ int rtl8125_tool_ioctl(struct rtl8125_private *tp, struct ifreq *ifr)
                 break;
 
         case RTLTOOL_WRITE_PHY:
+                r8125_spin_lock(&tp->phy_lock, flags);
                 rtl8125_mdio_prot_write(tp, my_cmd.offset, my_cmd.data);
+                r8125_spin_unlock(&tp->phy_lock, flags);
                 break;
 
         case RTLTOOL_READ_EPHY:
@@ -210,8 +215,10 @@ int rtl8125_tool_ioctl(struct rtl8125_private *tp, struct ifreq *ifr)
                 break;
 
         case RTL_WRITE_OOB_MAC:
-                if (my_cmd.len == 0 || my_cmd.len > 4)
-                        return -EOPNOTSUPP;
+                if (my_cmd.len == 0 || my_cmd.len > 4) {
+                        ret = -EOPNOTSUPP;
+                        break;
+                }
 
                 rtl8125_oob_mutex_lock(tp);
                 rtl8125_ocp_write(tp, my_cmd.offset, my_cmd.len, my_cmd.data);
@@ -219,20 +226,26 @@ int rtl8125_tool_ioctl(struct rtl8125_private *tp, struct ifreq *ifr)
                 break;
 
         case RTL_ENABLE_PCI_DIAG:
+                r8125_spin_lock(&tp->phy_lock, flags);
                 tp->rtk_enable_diag = 1;
+                r8125_spin_unlock(&tp->phy_lock, flags);
 
                 dprintk("enable rtk diag\n");
                 break;
 
         case RTL_DISABLE_PCI_DIAG:
+                r8125_spin_lock(&tp->phy_lock, flags);
                 tp->rtk_enable_diag = 0;
+                r8125_spin_unlock(&tp->phy_lock, flags);
 
                 dprintk("disable rtk diag\n");
                 break;
 
         case RTL_READ_MAC_OCP:
-                if (my_cmd.offset % 2)
-                        return -EOPNOTSUPP;
+                if (my_cmd.offset % 2) {
+                        ret = -EOPNOTSUPP;
+                        break;
+                }
 
                 my_cmd.data = rtl8125_mac_ocp_read(tp, my_cmd.offset);
                 if (copy_to_user(ifr->ifr_data, &my_cmd, sizeof(my_cmd))) {
@@ -242,14 +255,18 @@ int rtl8125_tool_ioctl(struct rtl8125_private *tp, struct ifreq *ifr)
                 break;
 
         case RTL_WRITE_MAC_OCP:
-                if ((my_cmd.offset % 2) || (my_cmd.len != 2))
-                        return -EOPNOTSUPP;
+                if ((my_cmd.offset % 2) || (my_cmd.len != 2)) {
+                        ret = -EOPNOTSUPP;
+                        break;
+                }
 
                 rtl8125_mac_ocp_write(tp, my_cmd.offset, (u16)my_cmd.data);
                 break;
 
         case RTL_DIRECT_READ_PHY_OCP:
+                r8125_spin_lock(&tp->phy_lock, flags);
                 my_cmd.data = rtl8125_mdio_prot_direct_read_phy_ocp(tp, my_cmd.offset);
+                r8125_spin_unlock(&tp->phy_lock, flags);
                 if (copy_to_user(ifr->ifr_data, &my_cmd, sizeof(my_cmd))) {
                         ret = -EFAULT;
                         break;
@@ -258,7 +275,9 @@ int rtl8125_tool_ioctl(struct rtl8125_private *tp, struct ifreq *ifr)
                 break;
 
         case RTL_DIRECT_WRITE_PHY_OCP:
+                r8125_spin_lock(&tp->phy_lock, flags);
                 rtl8125_mdio_prot_direct_write_phy_ocp(tp, my_cmd.offset, my_cmd.data);
+                r8125_spin_unlock(&tp->phy_lock, flags);
                 break;
 
 #ifdef ENABLE_FIBER_SUPPORT
@@ -268,7 +287,9 @@ int rtl8125_tool_ioctl(struct rtl8125_private *tp, struct ifreq *ifr)
                         break;
                 }
 
+                r8125_spin_lock(&tp->phy_lock, flags);
                 my_cmd.data = rtl8125_fiber_mdio_read(tp, my_cmd.offset);
+                r8125_spin_unlock(&tp->phy_lock, flags);
                 if (copy_to_user(ifr->ifr_data, &my_cmd, sizeof(my_cmd))) {
                         ret = -EFAULT;
                         break;
@@ -282,7 +303,9 @@ int rtl8125_tool_ioctl(struct rtl8125_private *tp, struct ifreq *ifr)
                         break;
                 }
 
+                r8125_spin_lock(&tp->phy_lock, flags);
                 rtl8125_fiber_mdio_write(tp, my_cmd.offset, my_cmd.data);
+                r8125_spin_unlock(&tp->phy_lock, flags);
                 break;
 #endif /* ENABLE_FIBER_SUPPORT */
 
