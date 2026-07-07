@@ -554,6 +554,12 @@ static const char * const pix_fmt_str[] = {
 	"YUV420",
 };
 
+/* Packed 10-bit 4:2:0 (four samples in five bytes), mainline's NV15. This
+ * kernel predates the uapi define, so provide it here for the 10-bit store path. */
+#ifndef V4L2_PIX_FMT_NV15
+#define V4L2_PIX_FMT_NV15 v4l2_fourcc('N', 'V', '1', '5')
+#endif
+
 enum ddr_store_fmt {
 	STORE_RGB888 = 0,
 	STORE_RGBA_ARGB,

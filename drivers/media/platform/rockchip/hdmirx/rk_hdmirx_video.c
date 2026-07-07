@@ -61,6 +61,18 @@ static const struct v4l2_dv_timings_cap hdmirx_timings_cap = {
 			     V4L2_DV_BT_CAP_INTERLACED)
 };
 
+/*
+ * Capture YUV420 as 10-bit NV15 instead of 8-bit NV12. Off by default: the graph
+ * pipeline currently consumes 8-bit NV12, so a deep-color source is captured at
+ * 8-bit (its extra bits were already dropped on the HDMI link's behalf). Flip this
+ * on for 10-bit bring-up/testing, or permanently once the pipeline consumes NV15.
+ * Runtime-writable via /sys/module/rockchip_hdmirx/parameters/enable_10bit; takes
+ * effect on the next signal (re)detect.
+ */
+static bool enable_10bit;
+module_param(enable_10bit, bool, 0644);
+MODULE_PARM_DESC(enable_10bit, "Capture YUV420 as 10-bit NV15 instead of 8-bit NV12");
+
 struct hdmirx_output_fmt {
 	u32 fourcc;
 	u8 cplanes;
@@ -89,6 +101,11 @@ static const struct hdmirx_output_fmt g_out_fmts[] = {
 		.cplanes = 2,
 		.mplanes = 1,
 		.bpp = { 8, 16 },
+	}, {
+		.fourcc = V4L2_PIX_FMT_NV15,
+		.cplanes = 2,
+		.mplanes = 1,
+		.bpp = { 10, 20 },	/* packed 10-bit: Y 10bpp, CbCr 20bpp -> 1.25x stride */
 	}
 };
 
@@ -694,6 +711,7 @@ static int fcc_xysubs(u32 fcc, u32 *xsubs, u32 *ysubs)
 		*ysubs = 1;
 		break;
 	case V4L2_PIX_FMT_NV12:
+	case V4L2_PIX_FMT_NV15:
 		*xsubs = 2;
 		*ysubs = 2;
 		break;
@@ -714,6 +732,7 @@ static u32 hdmirx_align_bits_per_pixel(const struct hdmirx_output_fmt *fmt,
 		case V4L2_PIX_FMT_NV24:
 		case V4L2_PIX_FMT_NV16:
 		case V4L2_PIX_FMT_NV12:
+		case V4L2_PIX_FMT_NV15:
 		case V4L2_PIX_FMT_BGR24:
 			bpp = fmt->bpp[plane_index];
 			break;
@@ -1228,7 +1247,8 @@ try_loop:
 		hdmirx_dev->cur_fmt_fourcc = V4L2_PIX_FMT_NV24;
 		break;
 	case HDMIRX_YUV420:
-		hdmirx_dev->cur_fmt_fourcc = V4L2_PIX_FMT_NV12;
+		hdmirx_dev->cur_fmt_fourcc = enable_10bit ?
+			V4L2_PIX_FMT_NV15 : V4L2_PIX_FMT_NV12;
 		break;
 
 	default:

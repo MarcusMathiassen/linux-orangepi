@@ -599,7 +599,8 @@ static enum ddr_store_fmt get_store_fmt(struct rk_hdmirx_dev *hdmirx_dev)
 	case HDMIRX_YUV422:
 		return STORE_YUV422_8BIT;
 	case HDMIRX_YUV420:
-		return STORE_YUV420_8BIT;
+		return hdmirx_dev->cur_fmt_fourcc == V4L2_PIX_FMT_NV15 ?
+			STORE_YUV420_10BIT : STORE_YUV420_8BIT;
 	default:
 		v4l2_dbg(1, debug, &hdmirx_dev->v4l2_dev,
 			 "unhandled pixfmt %d\n", hdmirx_dev->pix_fmt);
