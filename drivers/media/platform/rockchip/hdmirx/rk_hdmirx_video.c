@@ -1103,8 +1103,25 @@ static void hdmirx_get_timings(struct rk_hdmirx_dev *hdmirx_dev, struct v4l2_bt_
 		vfp = vtotal - vact - vs - vbp;
 	}
 
-	if (!from_dma)
-		hact = (hact * 24) / hdmirx_dev->color_depth;
+	if (!from_dma) {
+		/*
+		 * VMON counts the horizontal line at the TMDS/link clock, which
+		 * runs color_depth/24 faster under deep color (30/36/48-bit). The
+		 * pixelclock and active width are converted back to pixel units
+		 * (pixelclock in hdmirx_get_detected_timings, hact here), but the
+		 * blanking was left in link units — so htotal = hact + porches
+		 * mixed pixel-unit active with link-unit porches, inflating the
+		 * total and dragging fps low (a 4K60 12-bit source read as ~56Hz,
+		 * 1080p120 as ~112Hz). Scale the whole horizontal line uniformly so
+		 * every consumer's htotal/fps is right. color_depth == 24 makes
+		 * this a no-op for ordinary 8-bit.
+		 */
+		hact   = (hact   * 24) / hdmirx_dev->color_depth;
+		hfp    = (hfp    * 24) / hdmirx_dev->color_depth;
+		hs     = (hs     * 24) / hdmirx_dev->color_depth;
+		hbp    = (hbp    * 24) / hdmirx_dev->color_depth;
+		htotal = (htotal * 24) / hdmirx_dev->color_depth;
+	}
 
 	if (htotal && vtotal)
 		fps = (bt->pixelclock + (htotal * vtotal) / 2) / (htotal * vtotal);
