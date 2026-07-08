@@ -597,7 +597,8 @@ static enum ddr_store_fmt get_store_fmt(struct rk_hdmirx_dev *hdmirx_dev)
 	case HDMIRX_YUV444:
 		return STORE_YUV444_8BIT;
 	case HDMIRX_YUV422:
-		return STORE_YUV422_8BIT;
+		return hdmirx_dev->cur_fmt_fourcc == V4L2_PIX_FMT_NV20 ?
+			STORE_YUV422_10BIT : STORE_YUV422_8BIT;
 	case HDMIRX_YUV420:
 		return hdmirx_dev->cur_fmt_fourcc == V4L2_PIX_FMT_NV15 ?
 			STORE_YUV420_10BIT : STORE_YUV420_8BIT;
@@ -691,8 +692,9 @@ static void hdmirx_dma_config(struct rk_hdmirx_dev *hdmirx_dev)
 {
 	hdmirx_set_ddr_store_fmt(hdmirx_dev);
 
-	/* Note: uv_swap, rb can not swap, doc err*/
-	if (hdmirx_dev->cur_fmt_fourcc != V4L2_PIX_FMT_NV16)
+	/* Note: uv_swap, rb can not swap, doc err. 4:2:2 (NV16/NV20) does not swap. */
+	if (hdmirx_dev->cur_fmt_fourcc != V4L2_PIX_FMT_NV16 &&
+	    hdmirx_dev->cur_fmt_fourcc != V4L2_PIX_FMT_NV20)
 		hdmirx_update_bits(hdmirx_dev, DMA_CONFIG6, RB_SWAP_EN, RB_SWAP_EN);
 	else
 		hdmirx_update_bits(hdmirx_dev, DMA_CONFIG6, RB_SWAP_EN, 0);

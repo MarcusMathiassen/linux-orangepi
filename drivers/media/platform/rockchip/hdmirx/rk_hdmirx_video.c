@@ -106,6 +106,11 @@ static const struct hdmirx_output_fmt g_out_fmts[] = {
 		.cplanes = 2,
 		.mplanes = 1,
 		.bpp = { 10, 20 },	/* packed 10-bit: Y 10bpp, CbCr 20bpp -> 1.25x stride */
+	}, {
+		.fourcc = V4L2_PIX_FMT_NV20,
+		.cplanes = 2,
+		.mplanes = 1,
+		.bpp = { 10, 20 },	/* packed 10-bit 4:2:2: full-height CbCr, 1.25x stride */
 	}
 };
 
@@ -707,6 +712,7 @@ static int fcc_xysubs(u32 fcc, u32 *xsubs, u32 *ysubs)
 		*ysubs = 1;
 		break;
 	case V4L2_PIX_FMT_NV16:
+	case V4L2_PIX_FMT_NV20:
 		*xsubs = 2;
 		*ysubs = 1;
 		break;
@@ -731,6 +737,7 @@ static u32 hdmirx_align_bits_per_pixel(const struct hdmirx_output_fmt *fmt,
 		switch (fmt->fourcc) {
 		case V4L2_PIX_FMT_NV24:
 		case V4L2_PIX_FMT_NV16:
+		case V4L2_PIX_FMT_NV20:
 		case V4L2_PIX_FMT_NV12:
 		case V4L2_PIX_FMT_NV15:
 		case V4L2_PIX_FMT_BGR24:
@@ -1241,7 +1248,8 @@ try_loop:
 		hdmirx_dev->cur_fmt_fourcc = V4L2_PIX_FMT_BGR24;
 		break;
 	case HDMIRX_YUV422:
-		hdmirx_dev->cur_fmt_fourcc = V4L2_PIX_FMT_NV16;
+		hdmirx_dev->cur_fmt_fourcc = enable_10bit ?
+			V4L2_PIX_FMT_NV20 : V4L2_PIX_FMT_NV16;
 		break;
 	case HDMIRX_YUV444:
 		hdmirx_dev->cur_fmt_fourcc = V4L2_PIX_FMT_NV24;

@@ -559,6 +559,9 @@ static const char * const pix_fmt_str[] = {
 #ifndef V4L2_PIX_FMT_NV15
 #define V4L2_PIX_FMT_NV15 v4l2_fourcc('N', 'V', '1', '5')
 #endif
+#ifndef V4L2_PIX_FMT_NV20
+#define V4L2_PIX_FMT_NV20 v4l2_fourcc('N', 'V', '2', '0') /* packed 10-bit 4:2:2 */
+#endif
 
 enum ddr_store_fmt {
 	STORE_RGB888 = 0,
