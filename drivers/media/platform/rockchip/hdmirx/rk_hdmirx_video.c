@@ -61,18 +61,6 @@ static const struct v4l2_dv_timings_cap hdmirx_timings_cap = {
 			     V4L2_DV_BT_CAP_INTERLACED)
 };
 
-/*
- * Capture YUV420 as 10-bit NV15 instead of 8-bit NV12. Off by default: the graph
- * pipeline currently consumes 8-bit NV12, so a deep-color source is captured at
- * 8-bit (its extra bits were already dropped on the HDMI link's behalf). Flip this
- * on for 10-bit bring-up/testing, or permanently once the pipeline consumes NV15.
- * Runtime-writable via /sys/module/rockchip_hdmirx/parameters/enable_10bit; takes
- * effect on the next signal (re)detect.
- */
-static bool enable_10bit;
-module_param(enable_10bit, bool, 0644);
-MODULE_PARM_DESC(enable_10bit, "Capture YUV420 as 10-bit NV15 instead of 8-bit NV12");
-
 struct hdmirx_output_fmt {
 	u32 fourcc;
 	u8 cplanes;
@@ -1237,7 +1225,24 @@ void hdmirx_get_pix_fmt(struct rk_hdmirx_dev *hdmirx_dev)
 {
 	u32 val;
 	int timeout = 10;
+	bool deep;
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
+
+	/*
+	 * The store format must match what the link actually carries, so deep
+	 * color needs no opt-in: refresh the measured color depth (same
+	 * DMA_STATUS11 source as the format below) and pick the 10-bit
+	 * container for any deep-color signal (30/36/48-bit). A 12/16-bit
+	 * source is stored as its 10 MSBs — the deepest this DMA can pack
+	 * short of the (shelved, board-wedging) 16-bit path. 8-bit sources
+	 * keep the 8-bit formats: NV15/NV20 of an 8-bit link works but wastes
+	 * 25% bandwidth for zero information. RGB and YUV444 have no deep
+	 * store format on this DMA and stay 8-bit. A transient depth misread
+	 * cannot latch: hdmirx_try_to_get_timings requires the derived fourcc
+	 * to be stable across consecutive detections.
+	 */
+	hdmirx_get_colordepth(hdmirx_dev);
+	deep = hdmirx_dev->color_depth > 24;
 
 try_loop:
 	val = hdmirx_readl(hdmirx_dev, DMA_STATUS11);
@@ -1248,14 +1253,14 @@ try_loop:
 		hdmirx_dev->cur_fmt_fourcc = V4L2_PIX_FMT_BGR24;
 		break;
 	case HDMIRX_YUV422:
-		hdmirx_dev->cur_fmt_fourcc = enable_10bit ?
+		hdmirx_dev->cur_fmt_fourcc = deep ?
 			V4L2_PIX_FMT_NV20 : V4L2_PIX_FMT_NV16;
 		break;
 	case HDMIRX_YUV444:
 		hdmirx_dev->cur_fmt_fourcc = V4L2_PIX_FMT_NV24;
 		break;
 	case HDMIRX_YUV420:
-		hdmirx_dev->cur_fmt_fourcc = enable_10bit ?
+		hdmirx_dev->cur_fmt_fourcc = deep ?
 			V4L2_PIX_FMT_NV15 : V4L2_PIX_FMT_NV12;
 		break;
 
@@ -1366,7 +1371,8 @@ static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct 
 	hdmirx_get_color_range(hdmirx_dev);
 	hdmirx_get_color_space(hdmirx_dev);
 	bt->interlaced = field_type & BIT(0) ? V4L2_DV_INTERLACED : V4L2_DV_PROGRESSIVE;
-	hdmirx_get_colordepth(hdmirx_dev);
+	/* color_depth was refreshed by hdmirx_get_pix_fmt above (it drives the
+	 * deep-color format selection there). */
 	color_depth = hdmirx_dev->color_depth;
 	deframer_st = hdmirx_readl(hdmirx_dev, DEFRAMER_STATUS);
 	hdmirx_dev->is_dvi_mode = deframer_st & OPMODE_STS_MASK ? false : true;
@@ -1396,13 +1402,14 @@ static int hdmirx_try_to_get_timings(struct rk_hdmirx_dev *hdmirx_dev,
 	int i, cnt = 0, ret = 0;
 	bool from_dma = false;
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
-	u32 last_w, last_h;
+	u32 last_w, last_h, last_fourcc;
 	struct v4l2_bt_timings *bt = &timings->bt;
 	enum hdmirx_pix_fmt last_fmt;
 
 	last_w = 0;
 	last_h = 0;
 	last_fmt = HDMIRX_RGB888;
+	last_fourcc = 0;
 
 	for (i = 0; i < try_cnt; i++) {
 		ret = hdmirx_get_detected_timings(hdmirx_dev, timings, from_dma);
@@ -1412,8 +1419,13 @@ static int hdmirx_try_to_get_timings(struct rk_hdmirx_dev *hdmirx_dev,
 			last_h = bt->height;
 		}
 
+		/* cur_fmt_fourcc folds in the measured color depth (it picks
+		 * the deep-color container), so requiring it stable here is
+		 * what keeps a transient DMA_STATUS11 depth misread from
+		 * latching a wrong store format. */
 		if (ret || (last_w != bt->width) || (last_h != bt->height)
-			|| (last_fmt != hdmirx_dev->pix_fmt))
+			|| (last_fmt != hdmirx_dev->pix_fmt)
+			|| (last_fourcc != hdmirx_dev->cur_fmt_fourcc))
 			cnt = 0;
 		else
 			cnt++;
@@ -1424,6 +1436,7 @@ static int hdmirx_try_to_get_timings(struct rk_hdmirx_dev *hdmirx_dev,
 		last_w = bt->width;
 		last_h = bt->height;
 		last_fmt = hdmirx_dev->pix_fmt;
+		last_fourcc = hdmirx_dev->cur_fmt_fourcc;
 		usleep_range(10*1000, 10*1100);
 	}
 
