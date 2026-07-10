@@ -1230,16 +1230,31 @@ void hdmirx_get_pix_fmt(struct rk_hdmirx_dev *hdmirx_dev)
 
 	/*
 	 * The store format must match what the link actually carries, so deep
-	 * color needs no opt-in: refresh the measured color depth (same
-	 * DMA_STATUS11 source as the format below) and pick the 10-bit
-	 * container for any deep-color signal (30/36/48-bit). A 12/16-bit
-	 * source is stored as its 10 MSBs — the deepest this DMA can pack
-	 * short of the (shelved, board-wedging) 16-bit path. 8-bit sources
-	 * keep the 8-bit formats: NV15/NV20 of an 8-bit link works but wastes
-	 * 25% bandwidth for zero information. RGB and YUV444 have no deep
-	 * store format on this DMA and stay 8-bit. A transient depth misread
-	 * cannot latch: hdmirx_try_to_get_timings requires the derived fourcc
-	 * to be stable across consecutive detections.
+	 * color needs no opt-in:
+	 *
+	 * - YUV420 (and RGB/444) signal their depth in the GCP CD field, which
+	 *   this block latches into DMA_STATUS11: pick the 10-bit container
+	 *   (NV15) for any deep-color 4:2:0 signal (30/36/48-bit). A 12/16-bit
+	 *   source is stored as its 10 MSBs — the deepest this DMA can pack
+	 *   short of the (shelved, board-wedging) 16-bit path. 8-bit 4:2:0
+	 *   keeps NV12: NV15 of an 8-bit link works but wastes 25% bandwidth
+	 *   for zero information.
+	 *
+	 * - YUV422 is ALWAYS stored 10-bit (NV20): HDMI carries 4:2:2 in the
+	 *   base 24-bit TMDS mode with 12-bit component containers regardless
+	 *   of the source's real depth, and the GCP CD field reads 24-bit for
+	 *   it BY SPEC (HDMI 1.4b §6.5.2 — 4:2:2 is not a Deep Color mode).
+	 *   The measured depth therefore CANNOT distinguish an 8-bit from a
+	 *   12-bit 4:2:2 source; storing the top 10 bits is the only choice
+	 *   that never throws real sample bits away (an 8-bit source just has
+	 *   zero-padded low bits).
+	 *
+	 * - RGB and YUV444 have no deep store format on this DMA and stay
+	 *   8-bit.
+	 *
+	 * A transient depth misread cannot latch: hdmirx_try_to_get_timings
+	 * requires the derived fourcc to be stable across consecutive
+	 * detections.
 	 */
 	hdmirx_get_colordepth(hdmirx_dev);
 	deep = hdmirx_dev->color_depth > 24;
@@ -1253,8 +1268,7 @@ try_loop:
 		hdmirx_dev->cur_fmt_fourcc = V4L2_PIX_FMT_BGR24;
 		break;
 	case HDMIRX_YUV422:
-		hdmirx_dev->cur_fmt_fourcc = deep ?
-			V4L2_PIX_FMT_NV20 : V4L2_PIX_FMT_NV16;
+		hdmirx_dev->cur_fmt_fourcc = V4L2_PIX_FMT_NV20;
 		break;
 	case HDMIRX_YUV444:
 		hdmirx_dev->cur_fmt_fourcc = V4L2_PIX_FMT_NV24;
