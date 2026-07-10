@@ -2147,7 +2147,10 @@ static int hdmirx_set_cpu_limit_freq(struct rk_hdmirx_dev *hdmirx_dev)
 			dev_err(hdmirx_dev->dev,
 				"%s: failed to add sta freq constraint\n",
 				__func__);
-			freq_qos_remove_request(&hdmirx_dev->min_sta_freq_req);
+			/* The request was NOT added: removing it here would
+			 * plist_del a node that is not on the list. Just drop
+			 * the policy reference we took above. */
+			cpufreq_cpu_put(hdmirx_dev->policy);
 			hdmirx_dev->policy = NULL;
 			return -1;
 		}
@@ -2170,6 +2173,27 @@ static void hdmirx_cancel_cpu_limit_freq(struct rk_hdmirx_dev *hdmirx_dev)
 					FREQ_QOS_MIN_DEFAULT_VALUE);
 	else
 		dev_err(hdmirx_dev->dev, "%s freq qos nod add\n", __func__);
+}
+
+/*
+ * Undo hdmirx_set_cpu_limit_freq at module teardown. min_sta_freq_req lives
+ * inside hdmirx_dev, so leaving it linked into the cpufreq policy's
+ * constraints plist after this module is gone leaves the plist pointing into
+ * freed memory: the next plugin/plugout after a module reload then Oopses in
+ * plist_add (via pm_qos_update_target) — the "reboot on VIDIOC_S_EDID after
+ * rmmod/insmod" crash. Callers must have quiesced every work that can call
+ * hdmirx_set/cancel_cpu_limit_freq first.
+ */
+static void hdmirx_remove_cpu_limit_freq(struct rk_hdmirx_dev *hdmirx_dev)
+{
+	if (hdmirx_dev->freq_qos_add) {
+		freq_qos_remove_request(&hdmirx_dev->min_sta_freq_req);
+		hdmirx_dev->freq_qos_add = false;
+	}
+	if (hdmirx_dev->policy) {
+		cpufreq_cpu_put(hdmirx_dev->policy);
+		hdmirx_dev->policy = NULL;
+	}
 }
 
 static int hdmirx_get_custom_ctrl(struct v4l2_ctrl *ctrl)
@@ -2471,6 +2495,7 @@ err_work_queues:
 	cancel_delayed_work(&hdmirx_dev->delayed_work_hotplug);
 	cancel_delayed_work(&hdmirx_dev->delayed_work_res_change);
 	cancel_delayed_work(&hdmirx_dev->delayed_work_audio);
+	hdmirx_remove_cpu_limit_freq(hdmirx_dev);
 	clk_bulk_disable_unprepare(hdmirx_dev->num_clks, hdmirx_dev->clks);
 	if (hdmirx_dev->power_on)
 		pm_runtime_put_sync(dev);
@@ -2505,6 +2530,10 @@ static int hdmirx_remove(struct platform_device *pdev)
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_cec);
 	flush_work(&hdmirx_dev->work_wdt_config);
 	sip_wdt_config(WDT_STOP, 0, 0, 0);
+
+	/* All works quiesced: safe to unlink the freq-qos request before the
+	 * device (and the request node inside it) is freed. */
+	hdmirx_remove_cpu_limit_freq(hdmirx_dev);
 
 	irq_set_affinity_hint(hdmirx_dev->hdmi_irq, NULL);
 	irq_set_affinity_hint(hdmirx_dev->dma_irq, NULL);
