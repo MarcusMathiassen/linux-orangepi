@@ -845,6 +845,14 @@ static void hdmirx_set_fmt(struct hdmirx_stream *stream, struct v4l2_pix_format_
 			pixm->colorspace = V4L2_COLORSPACE_BT2020;
 			pixm->ycbcr_enc = V4L2_YCBCR_ENC_BT2020;
 			break;
+		case HDMIRX_CS_ITU601:
+			pixm->colorspace = V4L2_COLORSPACE_SMPTE170M;
+			pixm->ycbcr_enc = V4L2_YCBCR_ENC_601;
+			break;
+		case HDMIRX_CS_ITU709:
+			pixm->colorspace = V4L2_COLORSPACE_REC709;
+			pixm->ycbcr_enc = V4L2_YCBCR_ENC_709;
+			break;
 
 		default:
 			pixm->colorspace = V4L2_COLORSPACE_DEFAULT;
@@ -1344,7 +1352,7 @@ try_loop:
 
 void hdmirx_get_color_space(struct rk_hdmirx_dev *hdmirx_dev)
 {
-	u32 val;
+	u32 val, c, ec;
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
 
 	/*
@@ -1354,7 +1362,20 @@ void hdmirx_get_color_space(struct rk_hdmirx_dev *hdmirx_dev)
 	 */
 	hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PH2_1);
 	val = hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PB3_0);
-	hdmirx_dev->cur_color_space = (val & EXTEND_COLORIMETRY) >> 28;
+	c = (val & AVI_COLORIMETRY) >> 22;
+	ec = (val & EXTEND_COLORIMETRY) >> 28;
+
+	/* The EC bits mean nothing unless the C bits say Extended; sources
+	 * commonly leave stale/zero EC there, which used to be decoded as
+	 * xvYCC601. EC=7 is reserved -> fall back to 709.
+	 */
+	if (c == AVI_COLORIMETRY_EXTENDED)
+		hdmirx_dev->cur_color_space =
+			(ec < HDMIRX_CS_ITU601) ? ec : HDMIRX_CS_ITU709;
+	else if (c == 1)
+		hdmirx_dev->cur_color_space = HDMIRX_CS_ITU601;
+	else	/* C=2 (709) or C=0 (no data): 709 is the sane default */
+		hdmirx_dev->cur_color_space = HDMIRX_CS_ITU709;
 
 	v4l2_dbg(2, debug, v4l2_dev, "%s: video standard: %s\n", __func__, hdmirx_color_space[hdmirx_dev->cur_color_space]);
 }
@@ -1382,8 +1403,7 @@ void hdmirx_get_eotf(struct rk_hdmirx_dev *hdmirx_dev)
 
 void hdmirx_get_color_range(struct rk_hdmirx_dev *hdmirx_dev)
 {
-	u32 val;
-	int color_range;
+	u32 val, q, yq;
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
 
 	/*
@@ -1393,21 +1413,46 @@ void hdmirx_get_color_range(struct rk_hdmirx_dev *hdmirx_dev)
 	 */
 	hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PH2_1);
 	val = hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PB3_0);
-	color_range = (val & RGB_QUANTIZATION_RANGE) >> 26;
-	if (hdmirx_dev->pix_fmt != HDMIRX_RGB888 ||
-	    color_range != HDMIRX_DEFAULT_RANGE) {
-		hdmirx_dev->cur_color_range = color_range;
+	q = (val & RGB_QUANTIZATION_RANGE) >> 26;
+	val = hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PB7_4);
+	yq = (val & YCC_QUANTIZATION_RANGE) >> 14;
+
+	/* Requires cur_color_space (call hdmirx_get_color_space() first):
+	 * sYCC601 / AdobeYCC601 / AdobeRGB are full-range by definition.
+	 */
+	if (hdmirx_dev->cur_color_space == HDMIRX_SYCC601 ||
+	    hdmirx_dev->cur_color_space == HDMIRX_ADOBE_YCC601 ||
+	    hdmirx_dev->cur_color_space == HDMIRX_ADOBE_RGB) {
+		hdmirx_dev->cur_color_range = HDMIRX_FULL_RANGE;
+	} else if (hdmirx_dev->pix_fmt == HDMIRX_RGB888) {
+		if (q != HDMIRX_DEFAULT_RANGE) {
+			hdmirx_dev->cur_color_range = q;
+		} else {
+			/*
+			 * RGB with no explicit quantization range: CE video
+			 * modes (non-zero VIC) default to limited range, IT
+			 * formats (VIC 0) to full range, per CEA-861.
+			 */
+			hdmirx_dev->cur_color_range = hdmirx_dev->cur_vic ?
+				HDMIRX_LIMIT_RANGE : HDMIRX_FULL_RANGE;
+		}
 	} else {
 		/*
-		 * RGB with no explicit quantization range: CE video modes
-		 * (non-zero VIC) default to limited range, IT formats (VIC 0)
-		 * to full range, per CEA-861.
+		 * YCbCr: YQ (CTA-861-F) is the spec field (0=limited 1=full,
+		 * 2/3 reserved). Some sources (PS5) signal full range through
+		 * the RGB Q bits instead, so honor an explicit Q when YQ says
+		 * limited; otherwise YCbCr defaults to limited.
 		 */
-		hdmirx_dev->cur_color_range = hdmirx_dev->cur_vic ?
-			HDMIRX_LIMIT_RANGE : HDMIRX_FULL_RANGE;
+		if (yq == 1)
+			hdmirx_dev->cur_color_range = HDMIRX_FULL_RANGE;
+		else if (q != HDMIRX_DEFAULT_RANGE)
+			hdmirx_dev->cur_color_range = q;
+		else
+			hdmirx_dev->cur_color_range = HDMIRX_LIMIT_RANGE;
 	}
 
-	v4l2_dbg(2, debug, v4l2_dev, "%s: color_range: %s\n", __func__,
+	v4l2_dbg(2, debug, v4l2_dev, "%s: q:%u yq:%u color_range: %s\n",
+		__func__, q, yq,
 		(hdmirx_dev->cur_color_range == HDMIRX_DEFAULT_RANGE) ? "default" :
 		(hdmirx_dev->cur_color_range == HDMIRX_FULL_RANGE ? "full" : "limit"));
 }
@@ -1432,8 +1477,9 @@ static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct 
 	hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PH2_1);
 	val = hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PB7_4);
 	hdmirx_dev->cur_vic =  val & VIC_VAL_MASK;
-	hdmirx_get_color_range(hdmirx_dev);
+	/* colorspace before range: sYCC/AdobeYCC/AdobeRGB imply full range */
 	hdmirx_get_color_space(hdmirx_dev);
+	hdmirx_get_color_range(hdmirx_dev);
 	hdmirx_get_eotf(hdmirx_dev);
 	bt->interlaced = field_type & BIT(0) ? V4L2_DV_INTERLACED : V4L2_DV_PROGRESSIVE;
 	/* color_depth was refreshed by hdmirx_get_pix_fmt above (it drives the

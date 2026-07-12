@@ -35,6 +35,7 @@ enum hdmirx_color_range {
 };
 
 enum hdmirx_color_space {
+	/* 0..6 mirror the AVI EC bits (valid only when the C bits say Extended) */
 	HDMIRX_XVYCC601 = 0,
 	HDMIRX_XVYCC709 = 1,
 	HDMIRX_SYCC601 = 2,
@@ -42,6 +43,9 @@ enum hdmirx_color_space {
 	HDMIRX_ADOBE_RGB = 4,
 	HDMIRX_BT2020_YCC_CONST_LUM = 5,
 	HDMIRX_BT2020_RGB_OR_YCC = 6,
+	/* non-extended colorimetry (AVI C bits 1/2, or no data) */
+	HDMIRX_CS_ITU601 = 7,
+	HDMIRX_CS_ITU709 = 8,
 };
 
 /* Private v4l2 ioctl */

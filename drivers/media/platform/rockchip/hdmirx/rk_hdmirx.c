@@ -983,10 +983,11 @@ static void pkt_0_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 	u32 pre_eotf = hdmirx_dev->cur_eotf;
 
 	if (status & (PKTDEC_AVIIF_CHG_IRQ | PKTDEC_DRMIF_CHG_IRQ)) {
-		/* pix_fmt first: hdmirx_get_color_range() reads it */
+		/* order matters: hdmirx_get_color_range() reads pix_fmt AND
+		 * cur_color_space (sYCC/AdobeYCC/AdobeRGB imply full range) */
 		hdmirx_get_pix_fmt(hdmirx_dev);
-		hdmirx_get_color_range(hdmirx_dev);
 		hdmirx_get_color_space(hdmirx_dev);
+		hdmirx_get_color_range(hdmirx_dev);
 		hdmirx_get_eotf(hdmirx_dev);
 		if (hdmirx_dev->cur_fmt_fourcc != pre_fmt_fourcc ||
 		    hdmirx_dev->cur_color_range != pre_color_range ||
@@ -1193,8 +1194,10 @@ static void hdmirx_plugin(struct rk_hdmirx_dev *hdmirx_dev)
 
 void hdmirx_plugout(struct rk_hdmirx_dev *hdmirx_dev)
 {
-	/* the next source may never send a DRM InfoFrame; don't inherit PQ */
+	/* don't let the next source inherit this one's colorimetry */
 	hdmirx_dev->cur_eotf = HDMIRX_EOTF_SDR;
+	hdmirx_dev->cur_color_range = HDMIRX_DEFAULT_RANGE;
+	hdmirx_dev->cur_color_space = HDMIRX_CS_ITU709;
 	hdmirx_audio_handle_plugged_change(hdmirx_dev, 0);
 	extcon_set_state_sync(hdmirx_dev->extcon, EXTCON_JACK_VIDEO_IN, false);
 	hdmirx_update_bits(hdmirx_dev, SCDC_CONFIG, POWERPROVIDED, 0);
@@ -2088,6 +2091,8 @@ static int hdmirx_status_show(struct seq_file *s, void *v)
 	seq_printf(s, "Color Depth: %u bit", hdmirx_dev->color_depth / 3);
 	seq_puts(s, "\n");
 
+	/* colorspace before range: sYCC/AdobeYCC/AdobeRGB imply full range */
+	hdmirx_get_color_space(hdmirx_dev);
 	hdmirx_get_color_range(hdmirx_dev);
 	seq_puts(s, "Color Range: ");
 	if (hdmirx_dev->cur_color_range == HDMIRX_DEFAULT_RANGE)
@@ -2097,9 +2102,8 @@ static int hdmirx_status_show(struct seq_file *s, void *v)
 	else
 		seq_puts(s, "LIMITED\n");
 
-	hdmirx_get_color_space(hdmirx_dev);
 	seq_puts(s, "Color Space: ");
-	if (hdmirx_dev->cur_color_space < 8)
+	if (hdmirx_dev->cur_color_space < ARRAY_SIZE(hdmirx_color_space))
 		seq_printf(s, "%s\n", hdmirx_color_space[hdmirx_dev->cur_color_space]);
 	else
 		seq_puts(s, "Unknown\n");

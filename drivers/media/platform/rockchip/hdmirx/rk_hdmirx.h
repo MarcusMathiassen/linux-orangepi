@@ -309,8 +309,11 @@
 #define PKTDEC_AVIIF_PB3_0			0x1204
 #define RGB_QUANTIZATION_RANGE			GENMASK(27, 26)
 #define EXTEND_COLORIMETRY			GENMASK(30, 28)
+#define AVI_COLORIMETRY				GENMASK(23, 22)	/* PB2[7:6]: C bits */
+#define AVI_COLORIMETRY_EXTENDED		3		/* EC bits are valid */
 #define PKTDEC_AVIIF_PB7_4			0x1208
 #define VIC_VAL_MASK				GENMASK(6, 0)
+#define YCC_QUANTIZATION_RANGE			GENMASK(15, 14)	/* PB5[7:6]: YQ bits */
 #define PKTDEC_AVIIF_PB11_8			0x120c
 #define PKTDEC_AVIIF_PB15_12			0x1210
 #define PKTDEC_AVIIF_PB19_16			0x1214
@@ -551,9 +554,9 @@
 
 #define DMA_CONFIG_4_BITS (LINE_FLAG_INT_EN | HDMIRX_DMA_IDLE_INT | HDMIRX_LOCK_DISABLE_INT | LAST_FRAME_AXI_UNFINISH_INT_EN | FIFO_OVERFLOW_INT_EN | FIFO_UNDERFLOW_INT_EN | HDMIRX_AXI_ERROR_INT_EN)
 
-static char *hdmirx_color_space[8] = {
+static char *hdmirx_color_space[9] = {
 	"xvYCC601", "xvYCC709", "sYCC601", "Adobe_YCC601",
-	"Adobe_RGB", "BT2020_YcCbcCrc", "BT2020_RGB_OR_YCbCr", "Reserved"
+	"Adobe_RGB", "BT2020_YcCbcCrc", "BT2020_RGB_OR_YCbCr", "ITU601", "ITU709"
 };
 
 enum hdmirx_pix_fmt {
