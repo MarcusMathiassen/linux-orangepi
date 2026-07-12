@@ -324,6 +324,15 @@
 #define PKTDEC_AUDIF_PB19_16			0x1254
 #define PKTDEC_AUDIF_PB23_20			0x1258
 #define PKTDEC_AUDIF_PB27_24			0x125c
+/* The DRM (HDR) InfoFrame decoder is not in the TRM or vendor header; the
+ * PKTDEC blocks sit at 0x20 pitch (ACR 0x1100, AVI 0x1200, SPD 0x1220,
+ * AUDIF 0x1240, DRM 0x12a0) and were confirmed live against a PQ source
+ * (PH2_1 reads 0x1a01 = DRM InfoFrame version 1 / length 26). Snapshot
+ * semantics match AVIIF: PBx regs latch on the PH2_1 read.
+ */
+#define PKTDEC_DRMIF_PH2_1			0x12a0
+#define PKTDEC_DRMIF_PB3_0			0x12a4
+#define DRMIF_EOTF_MASK				GENMASK(10, 8)
 
 #define PKTFIFO_CONFIG				0x1500
 #define PKTFIFO_STORE_FILT_CONFIG		0x1504
@@ -471,11 +480,18 @@
 #define DEFRAMER_VSYNC_THR_REACHED_CLEAR	BIT(1)
 #define AVPUNIT_1_INT_FORCE			0x505C
 #define PKT_0_INT_STATUS			0x5080
+/* CHG irq bits follow the decoder block order: bit = 3 + (block - 0x1100)/0x20
+ * (ACR=3, VSIF=10, AVIIF=11, SPDIF=12, AUDIF=13), which puts the DRM decoder
+ * at 0x12a0 on bit 16. If the bit is wrong the cost is only a spurious or
+ * missed early EOTF re-read: every AVIIF change and timing detection re-reads
+ * the EOTF anyway. */
+#define PKTDEC_DRMIF_CHG_IRQ			BIT(16)
 #define PKTDEC_AUDIF_CHG_IRQ			BIT(13)
 #define PKTDEC_AVIIF_CHG_IRQ			BIT(11)
 #define PKTDEV_VSIF_CHG_IRQ			BIT(10)
 #define PKTDEC_ACR_CHG_IRQ			BIT(3)
 #define PKT_0_INT_MASK_N			0x5084
+#define PKTDEC_DRMIF_CHG_MASK_N			BIT(16)
 #define PKTDEC_AVIIF_CHG_MASK_N			BIT(11)
 #define PKTDEV_VSIF_CHG_MASK_N			BIT(10)
 #define PKTDEC_ACR_CHG_MASK_N			BIT(3)
@@ -545,6 +561,14 @@ enum hdmirx_pix_fmt {
 	HDMIRX_YUV422 = 1,
 	HDMIRX_YUV444 = 2,
 	HDMIRX_YUV420 = 3,
+};
+
+/* CTA-861 DRM InfoFrame EOTF codes (data byte 1, bits 2:0) */
+enum hdmirx_eotf {
+	HDMIRX_EOTF_SDR = 0,
+	HDMIRX_EOTF_HDR_GAMMA = 1,
+	HDMIRX_EOTF_ST2084 = 2,
+	HDMIRX_EOTF_HLG = 3,
 };
 
 static const char * const pix_fmt_str[] = {
@@ -715,6 +739,7 @@ struct rk_hdmirx_dev {
 	u32 cur_fmt_fourcc;
 	u32 cur_color_range;
 	u32 cur_color_space;
+	u32 cur_eotf;
 	u32 color_depth;
 	u32 cpu_freq_khz;
 	u32 bound_cpu;

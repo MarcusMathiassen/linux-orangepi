@@ -980,15 +980,18 @@ static void pkt_0_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 	u32 pre_fmt_fourcc = hdmirx_dev->cur_fmt_fourcc;
 	u32 pre_color_range = hdmirx_dev->cur_color_range;
 	u32 pre_color_space = hdmirx_dev->cur_color_space;
+	u32 pre_eotf = hdmirx_dev->cur_eotf;
 
-	if ((status & PKTDEC_AVIIF_CHG_IRQ)) {
+	if (status & (PKTDEC_AVIIF_CHG_IRQ | PKTDEC_DRMIF_CHG_IRQ)) {
 		/* pix_fmt first: hdmirx_get_color_range() reads it */
 		hdmirx_get_pix_fmt(hdmirx_dev);
 		hdmirx_get_color_range(hdmirx_dev);
 		hdmirx_get_color_space(hdmirx_dev);
+		hdmirx_get_eotf(hdmirx_dev);
 		if (hdmirx_dev->cur_fmt_fourcc != pre_fmt_fourcc ||
 		    hdmirx_dev->cur_color_range != pre_color_range ||
-		    hdmirx_dev->cur_color_space != pre_color_space) {
+		    hdmirx_dev->cur_color_space != pre_color_space ||
+		    hdmirx_dev->cur_eotf != pre_eotf) {
 			process_signal_change(hdmirx_dev);
 		}
 		v4l2_dbg(2, debug, v4l2_dev, "%s: ptk0_st:%#x\n",
@@ -1140,8 +1143,8 @@ static void hdmirx_interrupts_setup(struct rk_hdmirx_dev *hdmirx_dev, bool en)
 				   VMON_VMEAS_IRQ | VMON_HMEAS_IRQ,
 				   VMON_VMEAS_IRQ | VMON_HMEAS_IRQ);
 		hdmirx_update_bits(hdmirx_dev, PKT_0_INT_MASK_N,
-				PKTDEC_AVIIF_CHG_MASK_N,
-				PKTDEC_AVIIF_CHG_MASK_N);
+				PKTDEC_AVIIF_CHG_MASK_N | PKTDEC_DRMIF_CHG_MASK_N,
+				PKTDEC_AVIIF_CHG_MASK_N | PKTDEC_DRMIF_CHG_MASK_N);
 	} else {
 		hdmirx_writel(hdmirx_dev, MAINUNIT_0_INT_MASK_N, 0);
 		hdmirx_writel(hdmirx_dev, MAINUNIT_2_INT_MASK_N, 0);
@@ -1190,6 +1193,8 @@ static void hdmirx_plugin(struct rk_hdmirx_dev *hdmirx_dev)
 
 void hdmirx_plugout(struct rk_hdmirx_dev *hdmirx_dev)
 {
+	/* the next source may never send a DRM InfoFrame; don't inherit PQ */
+	hdmirx_dev->cur_eotf = HDMIRX_EOTF_SDR;
 	hdmirx_audio_handle_plugged_change(hdmirx_dev, 0);
 	extcon_set_state_sync(hdmirx_dev->extcon, EXTCON_JACK_VIDEO_IN, false);
 	hdmirx_update_bits(hdmirx_dev, SCDC_CONFIG, POWERPROVIDED, 0);

@@ -799,6 +799,19 @@ static void hdmirx_set_fmt(struct hdmirx_stream *stream, struct v4l2_pix_format_
 		break;
 	}
 
+	switch (hdmirx_dev->cur_eotf) {
+	case HDMIRX_EOTF_ST2084:
+		pixm->xfer_func = V4L2_XFER_FUNC_SMPTE2084;
+		break;
+	default:
+		/*
+		 * V4L2 has no HLG or "traditional HDR gamma" xfer func; those
+		 * and SDR keep the per-colorspace default.
+		 */
+		pixm->xfer_func = V4L2_XFER_FUNC_DEFAULT;
+		break;
+	}
+
 	if (hdmirx_dev->pix_fmt == HDMIRX_RGB888) {
 		if (hdmirx_dev->cur_color_space == HDMIRX_BT2020_RGB_OR_YCC)
 			pixm->colorspace = V4L2_COLORSPACE_BT2020;
@@ -954,6 +967,22 @@ static int hdmirx_enum_fmt_vid_cap_mplane(struct file *file, void *priv,
 
 	fmt = &g_out_fmts[f->index];
 	f->pixelformat = fmt->fourcc;
+
+	/*
+	 * This kernel's v4l2 core predates NV15/NV20 and WARNs (full stack
+	 * splat + taint) when asked to describe them; it skips that path when
+	 * the driver has already filled a description. Strings match mainline.
+	 */
+	switch (fmt->fourcc) {
+	case V4L2_PIX_FMT_NV15:
+		strscpy(f->description, "10-bit Y/CbCr 4:2:0 (Packed)",
+			sizeof(f->description));
+		break;
+	case V4L2_PIX_FMT_NV20:
+		strscpy(f->description, "10-bit Y/CbCr 4:2:2 (Packed)",
+			sizeof(f->description));
+		break;
+	}
 
 	return 0;
 }
@@ -1330,6 +1359,27 @@ void hdmirx_get_color_space(struct rk_hdmirx_dev *hdmirx_dev)
 	v4l2_dbg(2, debug, v4l2_dev, "%s: video standard: %s\n", __func__, hdmirx_color_space[hdmirx_dev->cur_color_space]);
 }
 
+void hdmirx_get_eotf(struct rk_hdmirx_dev *hdmirx_dev)
+{
+	u32 ph, val;
+	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
+
+	/*
+	 * Same snapshot semantics as the AVIIF decoder: PB3_0 latches on the
+	 * PH2_1 read. PH2_1 reads 0 while no DRM InfoFrame has been decoded,
+	 * which is an SDR source.
+	 */
+	ph = hdmirx_readl(hdmirx_dev, PKTDEC_DRMIF_PH2_1);
+	val = hdmirx_readl(hdmirx_dev, PKTDEC_DRMIF_PB3_0);
+	if (ph)
+		hdmirx_dev->cur_eotf = (val & DRMIF_EOTF_MASK) >> 8;
+	else
+		hdmirx_dev->cur_eotf = HDMIRX_EOTF_SDR;
+
+	v4l2_dbg(2, debug, v4l2_dev, "%s: drmif ph:%#x eotf:%u\n", __func__,
+		 ph, hdmirx_dev->cur_eotf);
+}
+
 void hdmirx_get_color_range(struct rk_hdmirx_dev *hdmirx_dev)
 {
 	u32 val;
@@ -1384,6 +1434,7 @@ static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct 
 	hdmirx_dev->cur_vic =  val & VIC_VAL_MASK;
 	hdmirx_get_color_range(hdmirx_dev);
 	hdmirx_get_color_space(hdmirx_dev);
+	hdmirx_get_eotf(hdmirx_dev);
 	bt->interlaced = field_type & BIT(0) ? V4L2_DV_INTERLACED : V4L2_DV_PROGRESSIVE;
 	/* color_depth was refreshed by hdmirx_get_pix_fmt above (it drives the
 	 * deep-color format selection there). */
