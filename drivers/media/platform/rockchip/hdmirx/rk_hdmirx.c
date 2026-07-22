@@ -1516,6 +1516,28 @@ static int hdmirx_runtime_suspend(struct device *dev)
 	flush_work(&hdmirx_dev->work_wdt_config);
 	sip_wdt_config(WDT_STOP, 0, 0, 0);
 
+	/*
+	 * The CPU latency floor and the cpufreq minimum are taken in
+	 * hdmirx_plugin() and dropped in hdmirx_plugout(), so they follow CABLE
+	 * state, not streaming state: with a source connected they stay held for
+	 * as long as the driver is up. Suspending without dropping them bars the
+	 * CPUs from deep idle and pins them above a frequency floor on behalf of
+	 * a device that is powered down.
+	 *
+	 * Releasing here is symmetric: the acquire side is driven by plug
+	 * detection, which re-runs once hdmirx_runtime_resume() re-enables the
+	 * interrupts, so a still-connected source re-takes both on the next
+	 * plugin. Both calls are idempotent updates, not add/remove, so this
+	 * cannot unbalance the constraint lists (see hdmirx_remove_cpu_limit_freq).
+	 *
+	 * The freq side is gated on freq_qos_add because
+	 * hdmirx_cancel_cpu_limit_freq() logs an error when no request was ever
+	 * added -- otherwise every suspend with nothing plugged in spams the log.
+	 */
+	cpu_latency_qos_update_request(&hdmirx_dev->pm_qos, PM_QOS_DEFAULT_VALUE);
+	if (hdmirx_dev->freq_qos_add)
+		hdmirx_cancel_cpu_limit_freq(hdmirx_dev);
+
 	clk_bulk_disable_unprepare(hdmirx_dev->num_clks, hdmirx_dev->clks);
 
 	v4l2_dbg(2, debug, v4l2_dev, "%s: suspend!\n", __func__);
