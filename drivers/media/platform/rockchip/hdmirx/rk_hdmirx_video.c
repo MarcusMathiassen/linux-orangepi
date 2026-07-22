@@ -1638,7 +1638,8 @@ static int hdmirx_get_edid(struct file *file, void *fh,
 	if (edid->start_block + edid->blocks > hdmirx_dev->edid_blocks_written)
 		edid->blocks = hdmirx_dev->edid_blocks_written - edid->start_block;
 
-	memcpy(edid->edid, &hdmirx_dev->edid, edid->blocks * EDID_BLOCK_SIZE);
+	memcpy(edid->edid, &hdmirx_dev->edid[edid->start_block * EDID_BLOCK_SIZE],
+			edid->blocks * EDID_BLOCK_SIZE);
 
 	v4l2_dbg(1, debug, v4l2_dev, "%s: Read EDID: =====\n", __func__);
 	if (debug > 0)
