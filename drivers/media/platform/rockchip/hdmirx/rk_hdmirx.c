@@ -1723,16 +1723,82 @@ static ssize_t status_store(struct device *dev,
 	return count;
 }
 
+static const char * const hdmirx_spd_sources[] = {
+	"unknown", "digital-stb", "dvd", "d-vhs", "hdd-recorder", "dvc", "dsc",
+	"video-cd", "game", "pc", "blu-ray", "sacd", "hd-dvd", "pmp",
+};
+
+static void hdmirx_spd_text(char *out, const u8 *in, int n)
+{
+	int i, end = 0;
+
+	for (i = 0; i < n; i++) {
+		out[i] = (in[i] >= 0x20 && in[i] < 0x7f) ? in[i] : ' ';
+		if (out[i] != ' ')
+			end = i + 1;
+	}
+	out[end] = 0;
+}
+
+static ssize_t spd_show(struct device *dev,
+			struct device_attribute *attr, char *buf)
+{
+	struct rk_hdmirx_dev *hdmirx_dev = dev_get_drvdata(dev);
+	u8 pb[28], sum;
+	char vendor[9], product[17];
+	u32 ph, w;
+	int i, len, ok = 0;
+
+	if (!hdmirx_dev)
+		return -EINVAL;
+	if (pm_runtime_get_if_active(hdmirx_dev->dev, false) <= 0)
+		return 0;
+	if (!mutex_trylock(&hdmirx_dev->work_lock)) {
+		pm_runtime_put(hdmirx_dev->dev);
+		return 0;
+	}
+	if (tx_5v_power_present(hdmirx_dev) && hdmirx_dev->get_timing &&
+	    hdmirx_signal_locked(hdmirx_dev)) {
+		ph = hdmirx_readl(hdmirx_dev, PKTDEC_SRCPDIF_PH2_1);
+		for (i = 0; i < 7; i++) {
+			w = hdmirx_readl(hdmirx_dev, PKTDEC_SRCPDIF_PB3_0 + 4 * i);
+			pb[4 * i] = w;
+			pb[4 * i + 1] = w >> 8;
+			pb[4 * i + 2] = w >> 16;
+			pb[4 * i + 3] = w >> 24;
+		}
+		len = (ph >> 8) & 0xff;
+		if (len >= 25 && len <= 27) {
+			sum = 0x83 + (ph & 0xff) + len;
+			for (i = 0; i <= len; i++)
+				sum += pb[i];
+			ok = sum == 0;
+		}
+	}
+	mutex_unlock(&hdmirx_dev->work_lock);
+	pm_runtime_put(hdmirx_dev->dev);
+	if (!ok)
+		return 0;
+
+	hdmirx_spd_text(vendor, pb + 1, 8);
+	hdmirx_spd_text(product, pb + 9, 16);
+	return sysfs_emit(buf, "vendor=%s\nproduct=%s\nsource=%s\n", vendor,
+			  product, pb[25] < ARRAY_SIZE(hdmirx_spd_sources) ?
+			  hdmirx_spd_sources[pb[25]] : "unknown");
+}
+
 static DEVICE_ATTR_RO(audio_rate);
 static DEVICE_ATTR_RO(audio_present);
 static DEVICE_ATTR_RW(edid);
 static DEVICE_ATTR_RW(status);
+static DEVICE_ATTR_RO(spd);
 
 static struct attribute *hdmirx_attrs[] = {
 	&dev_attr_audio_rate.attr,
 	&dev_attr_audio_present.attr,
 	&dev_attr_edid.attr,
 	&dev_attr_status.attr,
+	&dev_attr_spd.attr,
 	NULL
 };
 ATTRIBUTE_GROUPS(hdmirx);
