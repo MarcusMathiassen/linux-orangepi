@@ -747,7 +747,7 @@ struct rk_hdmirx_dev {
 	bool abort_lock_wait;
 	bool force_off;
 	u8 hdcp_enable;
-	u32 num_clks;
+	int num_clks;   /* devm_clk_bulk_get_all() can fail: signed (mainline) */
 	u32 edid_blocks_written;
 	u32 hpd_trigger_level;
 	u32 cur_vic;

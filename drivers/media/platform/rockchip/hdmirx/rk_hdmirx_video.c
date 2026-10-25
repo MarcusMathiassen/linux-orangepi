@@ -1098,12 +1098,12 @@ static int hdmirx_g_dv_timings(struct file *file, void *_fh,
 	u32 dma_cfg1;
 
 	if (port_no_link(hdmirx_dev)) {
-		v4l2_err(v4l2_dev, "%s port has no link!\n", __func__);
+		v4l2_dbg(1, debug, v4l2_dev, "%s port has no link!\n", __func__);
 		return -ENOLINK;
 	}
 
 	if (signal_not_lock(hdmirx_dev)) {
-		v4l2_err(v4l2_dev, "%s signal is not locked!\n", __func__);
+		v4l2_dbg(1, debug, v4l2_dev, "%s signal is not locked!\n", __func__);
 		return -ENOLCK;
 	}
 
@@ -1127,12 +1127,12 @@ static int hdmirx_query_dv_timings(struct file *file, void *_fh, struct v4l2_dv_
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
 
 	if (port_no_link(hdmirx_dev)) {
-		v4l2_err(v4l2_dev, "%s port has no link!\n", __func__);
+		v4l2_dbg(1, debug, v4l2_dev, "%s port has no link!\n", __func__);
 		return -ENOLINK;
 	}
 
 	if (signal_not_lock(hdmirx_dev)) {
-		v4l2_err(v4l2_dev, "%s signal is not locked!\n", __func__);
+		v4l2_dbg(1, debug, v4l2_dev, "%s signal is not locked!\n", __func__);
 		return -ENOLCK;
 	}
 
@@ -1585,6 +1585,31 @@ static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct 
 	return 0;
 }
 
+/*
+ * controller_init forces both syncs positive. A source sending negative sync
+ * (VESA/DVI modes) measures as invalid timings that way, every retry, and the
+ * hotplug work starts over forever. Mainline flips to the detected polarity
+ * with the DMA's sync toggle halfway through the retries; so do we.
+ */
+static void hdmirx_toggle_polarity(struct rk_hdmirx_dev *hdmirx_dev)
+{
+	u32 val = hdmirx_readl(hdmirx_dev, DMA_CONFIG6);
+	const u32 ovr = VPROC_VSYNC_POL_OVR_VALUE | VPROC_VSYNC_POL_OVR_EN |
+			VPROC_HSYNC_POL_OVR_VALUE | VPROC_HSYNC_POL_OVR_EN;
+
+	v4l2_info(&hdmirx_dev->v4l2_dev, "%s: timings invalid, sync polarity %s\n",
+		  __func__, val & (VSYNC_TOGGLE_EN | HSYNC_TOGGLE_EN) ? "forced positive" : "toggled");
+	if (!(val & (VSYNC_TOGGLE_EN | HSYNC_TOGGLE_EN))) {
+		hdmirx_update_bits(hdmirx_dev, DMA_CONFIG6, VSYNC_TOGGLE_EN | HSYNC_TOGGLE_EN,
+				   VSYNC_TOGGLE_EN | HSYNC_TOGGLE_EN);
+		hdmirx_update_bits(hdmirx_dev, VIDEO_CONFIG2, ovr,
+				   VPROC_VSYNC_POL_OVR_EN | VPROC_HSYNC_POL_OVR_EN);
+		return;
+	}
+	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG6, VSYNC_TOGGLE_EN | HSYNC_TOGGLE_EN, 0);
+	hdmirx_update_bits(hdmirx_dev, VIDEO_CONFIG2, ovr, ovr);
+}
+
 static int hdmirx_try_to_get_timings(struct rk_hdmirx_dev *hdmirx_dev,
 		struct v4l2_dv_timings *timings, int try_cnt)
 {
@@ -1602,6 +1627,8 @@ static int hdmirx_try_to_get_timings(struct rk_hdmirx_dev *hdmirx_dev,
 
 	for (i = 0; i < try_cnt; i++) {
 		ret = hdmirx_get_detected_timings(hdmirx_dev, timings, from_dma, true);
+		if (ret && i == 10 && cnt == 0)
+			hdmirx_toggle_polarity(hdmirx_dev);
 
 		if ((last_w == 0) && (last_h == 0)) {
 			last_w = bt->width;
@@ -1667,6 +1694,21 @@ void hdmirx_format_change(struct rk_hdmirx_dev *hdmirx_dev)
 	v4l2_event_queue(&stream->vdev, &ev_src_chg);
 }
 
+/* the frame interval of the timings in use (mainline) */
+static int hdmirx_g_parm(struct file *file, void *priv, struct v4l2_streamparm *parm)
+{
+	struct hdmirx_stream *stream = video_drvdata(file);
+	struct rk_hdmirx_dev *hdmirx_dev = stream->hdmirx_dev;
+
+	if (parm->type != V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE &&
+	    parm->type != V4L2_BUF_TYPE_VIDEO_CAPTURE)   /* what v4l2-ctl asks */
+		return -EINVAL;
+
+	parm->parm.capture.timeperframe = v4l2_calc_timeperframe(&hdmirx_dev->timings);
+
+	return 0;
+}
+
 static int hdmirx_dv_timings_cap(struct file *file, void *fh,
 				   struct v4l2_dv_timings_cap *cap)
 {
@@ -1678,6 +1720,9 @@ static int hdmirx_dv_timings_cap(struct file *file, void *fh,
 static int hdmirx_enum_input(struct file *file, void *priv,
 			    struct v4l2_input *input)
 {
+	struct hdmirx_stream *stream = video_drvdata(file);
+	struct rk_hdmirx_dev *hdmirx_dev = stream->hdmirx_dev;
+
 	if (input->index > 0)
 		return -EINVAL;
 
@@ -1685,6 +1730,14 @@ static int hdmirx_enum_input(struct file *file, void *priv,
 	input->std = 0;
 	strscpy(input->name, "hdmirx", sizeof(input->name));
 	input->capabilities = V4L2_IN_CAP_DV_TIMINGS;
+	/* from mainline (d029dfa8170b): the cable and lock state, from the
+	 * same tests QUERY_DV_TIMINGS uses (the cached 5V, three register
+	 * reads: nothing sleeps); 0 said "locked" with nothing plugged in */
+	input->status = 0;
+	if (port_no_link(hdmirx_dev))
+		input->status |= V4L2_IN_ST_NO_POWER;
+	if (signal_not_lock(hdmirx_dev))
+		input->status |= V4L2_IN_ST_NO_SIGNAL;
 
 	return 0;
 }
@@ -1869,6 +1922,7 @@ static const struct v4l2_ioctl_ops hdmirx_v4l2_ioctl_ops = {
 	.vidioc_query_dv_timings = hdmirx_query_dv_timings,
 	.vidioc_dv_timings_cap = hdmirx_dv_timings_cap,
 	.vidioc_enum_input = hdmirx_enum_input,
+	.vidioc_g_parm = hdmirx_g_parm,
 	.vidioc_g_edid = hdmirx_get_edid,
 	.vidioc_s_edid = hdmirx_set_edid,
 
