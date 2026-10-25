@@ -20,6 +20,7 @@
 #include <linux/math64.h>
 #include <linux/mfd/syscon.h>
 #include <linux/module.h>
+#include <linux/sched/isolation.h>
 #include <linux/of.h>
 #include <linux/of_platform.h>
 #include <linux/of_reserved_mem.h>
@@ -66,6 +67,16 @@ MODULE_PARM_DESC(low_latency, "low_latency en(0-1)");
 
 static int signal_debounce_ms = 50;
 module_param(signal_debounce_ms, int, 0644);
+
+/*
+ * The CPU the HDMI FIQ (TF-A), the PHY auto-touch, the driver's works and
+ * the IRQ hints go to; the watchdog ping runs on the one below it. -1: the
+ * highest housekeeping CPU (not isolated by isolcpus/nohz_full) above 1, so
+ * none of it lands on a CPU isolated for real-time work (it went to 5 and 6).
+ */
+static int bound_cpu = -1;
+module_param(bound_cpu, int, 0444);
+MODULE_PARM_DESC(bound_cpu, "CPU for the HDMI FIQ, PHY touch and works; -1 = the highest housekeeping CPU");
 MODULE_PARM_DESC(signal_debounce_ms,
 	"re-validate a transient signal change before tearing down, in ms (0 = tear down immediately)");
 
@@ -196,6 +207,30 @@ static void hdmirx_reset_dma(struct rk_hdmirx_dev *hdmirx_dev)
 	spin_unlock_irqrestore(&hdmirx_dev->rst_lock, lock_flags);
 }
 
+static void hdmirx_dma_config(struct rk_hdmirx_dev *hdmirx_dev);
+
+/*
+ * Stop the capture DMA for good: no new frame, no interrupt, and the frame in
+ * flight abandoned (the reset) so that no buffer is written after this
+ * returns. The reset may clear the store config, so it is set again.
+ */
+void hdmirx_stop_dma(struct rk_hdmirx_dev *hdmirx_dev)
+{
+	sip_hdmirx_config(HDMIRX_INFO_NOTIFY, 0, DMA_CONFIG6, 0);
+	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG6, HDMIRX_DMA_EN, 0);
+	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG4,
+			LINE_FLAG_INT_EN |
+			HDMIRX_DMA_IDLE_INT |
+			HDMIRX_LOCK_DISABLE_INT |
+			LAST_FRAME_AXI_UNFINISH_INT_EN |
+			FIFO_OVERFLOW_INT_EN |
+			FIFO_UNDERFLOW_INT_EN |
+			HDMIRX_AXI_ERROR_INT_EN, 0);
+	hdmirx_writel(hdmirx_dev, DMA_CONFIG5, 0xffffffff);
+	hdmirx_reset_dma(hdmirx_dev);
+	hdmirx_dma_config(hdmirx_dev);
+}
+
 static void hdmirx_reset_all(struct rk_hdmirx_dev *hdmirx_dev)
 {
 	unsigned long lock_flags = 0;
@@ -234,7 +269,14 @@ void hdmirx_clear_interrupt(struct rk_hdmirx_dev *hdmirx_dev, u32 reg, u32 val)
 	hdmirx_writel(hdmirx_dev, reg, val);
 }
 
-bool tx_5v_power_present(struct rk_hdmirx_dev *hdmirx_dev)
+/*
+ * The 5V pin, debounced: 7 of up to 10 reads 1 ms apart, so 7-10 ms asleep.
+ * Only the works that act on a plug change (and probe) sample it; it stores
+ * what it read for tx_5v_power_present(). Called from the V4L2 ioctls before,
+ * it slept under the video device lock that vb2_fop_poll takes, holding a
+ * streaming capture's frame-done wake back by as long.
+ */
+bool tx_5v_power_sample(struct rk_hdmirx_dev *hdmirx_dev)
 {
 	bool ret;
 	int val, i, cnt;
@@ -250,9 +292,16 @@ bool tx_5v_power_present(struct rk_hdmirx_dev *hdmirx_dev)
 	}
 
 	ret = (cnt >= 7) ? true : false;
+	WRITE_ONCE(hdmirx_dev->tx_5v, ret);
 	v4l2_dbg(3, debug, &hdmirx_dev->v4l2_dev, "%s: %d\n", __func__, ret);
 
 	return ret;
+}
+
+/* the 5V state the last sample found: no sleep, any context */
+bool tx_5v_power_present(struct rk_hdmirx_dev *hdmirx_dev)
+{
+	return READ_ONCE(hdmirx_dev->tx_5v);
 }
 
 static void hdmirx_cec_state_reconfiguration(struct rk_hdmirx_dev *hdmirx_dev, bool en)
@@ -638,7 +687,7 @@ static int hdmirx_wait_lock_and_get_timing(struct rk_hdmirx_dev *hdmirx_dev)
 		if (i % NO_LOCK_CFG_RETRY_TIME == 0)
 			hdmirx_phy_config(hdmirx_dev);
 
-		if (!tx_5v_power_present(hdmirx_dev)) {
+		if (!tx_5v_power_sample(hdmirx_dev)) {
 			//v4l2_err(v4l2_dev, "%s HDMI pull out, return!\n", __func__);
 			return -1;
 		}
@@ -845,7 +894,7 @@ static void hdmirx_delayed_work_signal_check(struct work_struct *work)
 		return;
 	}
 
-	if (!tx_5v_power_present(hdmirx_dev) || !hdmirx_signal_locked(hdmirx_dev)) {
+	if (!tx_5v_power_sample(hdmirx_dev) || !hdmirx_signal_locked(hdmirx_dev)) {
 		v4l2_dbg(1, debug, v4l2_dev,
 			 "%s: signal loss confirmed, tearing down\n", __func__);
 		process_signal_change(hdmirx_dev);
@@ -985,7 +1034,7 @@ static void pkt_0_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 	if (status & (PKTDEC_AVIIF_CHG_IRQ | PKTDEC_DRMIF_CHG_IRQ)) {
 		/* order matters: hdmirx_get_color_range() reads pix_fmt AND
 		 * cur_color_space (sYCC/AdobeYCC/AdobeRGB imply full range) */
-		hdmirx_get_pix_fmt(hdmirx_dev);
+		hdmirx_get_pix_fmt(hdmirx_dev, false);   /* hard IRQ: no retry sleeps */
 		hdmirx_get_color_space(hdmirx_dev);
 		hdmirx_get_color_range(hdmirx_dev);
 		hdmirx_get_eotf(hdmirx_dev);
@@ -1219,10 +1268,10 @@ void hdmirx_plugout(struct rk_hdmirx_dev *hdmirx_dev)
 	hdmirx_writel(hdmirx_dev, PHYCREG_CONFIG0, 0x0);
 	cancel_delayed_work(&hdmirx_dev->delayed_work_res_change);
 	cancel_delayed_work(&hdmirx_dev->delayed_work_signal_check);
-	cancel_delayed_work(&hdmirx_dev->delayed_work_audio);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_audio);   /* re-arms itself; takes no work_lock */
 	cpu_latency_qos_update_request(&hdmirx_dev->pm_qos, PM_QOS_DEFAULT_VALUE);
 	hdmirx_cancel_cpu_limit_freq(hdmirx_dev);
-	cancel_delayed_work(&hdmirx_dev->delayed_work_heartbeat);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_heartbeat);   /* re-arms itself; takes no work_lock */
 	flush_work(&hdmirx_dev->work_wdt_config);
 	sip_wdt_config(WDT_STOP, 0, 0, 0);
 	rockchip_clear_system_status(SYS_STATUS_HDMIRX);
@@ -1244,7 +1293,7 @@ static void hdmirx_delayed_work_hotplug(struct work_struct *work)
 	hdmirx_dev->get_timing = false;
 	sip_hdmirx_config(HDMIRX_INFO_NOTIFY, 0, DMA_CONFIG6, 0);
 	v4l2_event_queue(&stream->vdev, &evt_signal_lost);
-	plugin = tx_5v_power_present(hdmirx_dev);
+	plugin = tx_5v_power_sample(hdmirx_dev);
 	v4l2_ctrl_s_ctrl(hdmirx_dev->detect_tx_5v_ctrl, plugin);
 	v4l2_dbg(1, debug, v4l2_dev, "%s: plugin:%d\n", __func__, plugin);
 
@@ -1275,7 +1324,7 @@ static void hdmirx_delayed_work_res_change(struct work_struct *work)
 
 	mutex_lock(&hdmirx_dev->work_lock);
 	sip_hdmirx_config(HDMIRX_INFO_NOTIFY, 0, DMA_CONFIG6, 0);
-	plugin = tx_5v_power_present(hdmirx_dev);
+	plugin = tx_5v_power_sample(hdmirx_dev);
 	v4l2_dbg(1, debug, v4l2_dev, "%s: plugin:%d\n", __func__, plugin);
 	if (plugin) {
 		hdmirx_submodule_init(hdmirx_dev);
@@ -1392,6 +1441,7 @@ static int hdmirx_parse_dt(struct rk_hdmirx_dev *hdmirx_dev)
 		dev_err(dev, "failed to get hdmirx det gpio\n");
 		return PTR_ERR(hdmirx_dev->hdmirx_det_gpio);
 	}
+	tx_5v_power_sample(hdmirx_dev);
 
 	hdmirx_dev->grf = syscon_regmap_lookup_by_phandle(np, "rockchip,grf");
 	if (IS_ERR(hdmirx_dev->grf)) {
@@ -2348,7 +2398,6 @@ static int hdmirx_probe(struct platform_device *pdev)
 	struct resource *res;
 	int ret, irq, cpu_aff;
 	struct hdmirx_cec_data cec_data;
-	struct cpumask cpumask;
 
 	hdmirx_dev = devm_kzalloc(dev, sizeof(*hdmirx_dev), GFP_KERNEL);
 	if (!hdmirx_dev)
@@ -2375,17 +2424,26 @@ static int hdmirx_probe(struct platform_device *pdev)
 	 * in order to quickly respond to FIQ and prevent them from affecting
 	 * each other.
 	 */
-	if (sip_cpu_logical_map_mpidr(0) == 0) {
-		cpu_aff = sip_cpu_logical_map_mpidr(5);
-		hdmirx_dev->bound_cpu = 5;
+	if (bound_cpu >= 1 && bound_cpu < nr_cpu_ids && cpu_online(bound_cpu)) {
+		hdmirx_dev->bound_cpu = bound_cpu;
 	} else {
-		cpu_aff = sip_cpu_logical_map_mpidr(1);
-		hdmirx_dev->bound_cpu = 1;
+		const struct cpumask *hk = housekeeping_cpumask(HK_TYPE_DOMAIN);
+		int c, pick = -1;
+
+		for_each_cpu_and(c, hk, cpu_online_mask)
+			if (c >= 2)
+				pick = c;
+		if (pick >= 2)
+			hdmirx_dev->bound_cpu = pick;
+		else
+			hdmirx_dev->bound_cpu = sip_cpu_logical_map_mpidr(0) == 0 ? 5 : 1;
 	}
+	cpu_aff = sip_cpu_logical_map_mpidr(hdmirx_dev->bound_cpu);
 
 	sip_fiq_control(RK_SIP_FIQ_CTRL_SET_AFF, RK_IRQ_HDMIRX_HDMI, cpu_aff);
 	hdmirx_dev->phy_cpuid = (cpu_aff >> 8) & 0xf;
-	hdmirx_dev->wdt_cfg_bound_cpu = hdmirx_dev->bound_cpu + 1;
+	/* the ping on another CPU than the FIQ's: both housekeeping when bound_cpu is */
+	hdmirx_dev->wdt_cfg_bound_cpu = hdmirx_dev->bound_cpu > 1 ? hdmirx_dev->bound_cpu - 1 : hdmirx_dev->bound_cpu + 1;
 	dev_info(dev, "%s: cpu_aff:%#x, Bound_cpu:%d, wdt_cfg_bound_cpu:%d, phy_cpuid:%d\n",
 			__func__, cpu_aff,
 			hdmirx_dev->bound_cpu,
@@ -2423,9 +2481,7 @@ static int hdmirx_probe(struct platform_device *pdev)
 		goto err_work_queues;
 	}
 
-	cpumask_clear(&cpumask);
-	cpumask_set_cpu(hdmirx_dev->bound_cpu, &cpumask);
-	irq_set_affinity_hint(irq, &cpumask);
+	irq_set_affinity_hint(irq, cpumask_of(hdmirx_dev->bound_cpu));
 	hdmirx_dev->hdmi_irq = irq;
 	ret = devm_request_irq(dev, irq, hdmirx_hdmi_irq_handler, 0,
 			       RK_HDMIRX_DRVNAME"-hdmi", hdmirx_dev);
@@ -2441,9 +2497,7 @@ static int hdmirx_probe(struct platform_device *pdev)
 		goto err_work_queues;
 	}
 
-	cpumask_clear(&cpumask);
-	cpumask_set_cpu(hdmirx_dev->bound_cpu, &cpumask);
-	irq_set_affinity_hint(irq, &cpumask);
+	irq_set_affinity_hint(irq, cpumask_of(hdmirx_dev->bound_cpu));
 	hdmirx_dev->dma_irq = irq;
 	ret = devm_request_threaded_irq(dev, irq, NULL, hdmirx_dma_irq_handler, IRQF_ONESHOT, RK_HDMIRX_DRVNAME"-dma", hdmirx_dev);
 	if (ret) {
@@ -2530,9 +2584,7 @@ static int hdmirx_probe(struct platform_device *pdev)
 		goto err_unreg_video_dev;
 	}
 
-	cpumask_clear(&cpumask);
-	cpumask_set_cpu(hdmirx_dev->bound_cpu, &cpumask);
-	irq_set_affinity_hint(irq, &cpumask);
+	irq_set_affinity_hint(irq, cpumask_of(hdmirx_dev->bound_cpu));
 	hdmirx_dev->det_irq = irq;
 	ret = devm_request_irq(dev, irq, hdmirx_5v_det_irq_handler,
 			       IRQF_TRIGGER_FALLING | IRQF_TRIGGER_RISING,
@@ -2556,9 +2608,7 @@ static int hdmirx_probe(struct platform_device *pdev)
 			ret = irq;
 			goto err_unreg_video_dev;
 		}
-		cpumask_clear(&cpumask);
-		cpumask_set_cpu(hdmirx_dev->bound_cpu, &cpumask);
-		irq_set_affinity_hint(irq, &cpumask);
+		irq_set_affinity_hint(irq, cpumask_of(hdmirx_dev->bound_cpu));
 
 		cec_data.hdmirx = hdmirx_dev;
 		cec_data.dev = hdmirx_dev->dev;

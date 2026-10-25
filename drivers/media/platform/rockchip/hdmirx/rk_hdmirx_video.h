@@ -11,7 +11,7 @@ void hdmirx_format_change(struct rk_hdmirx_dev *hdmirx_dev);
 void hdmirx_get_color_range(struct rk_hdmirx_dev *hdmirx_dev);
 void hdmirx_get_color_space(struct rk_hdmirx_dev *hdmirx_dev);
 void hdmirx_get_eotf(struct rk_hdmirx_dev *hdmirx_dev);
-void hdmirx_get_pix_fmt(struct rk_hdmirx_dev *hdmirx_dev);
+void hdmirx_get_pix_fmt(struct rk_hdmirx_dev *hdmirx_dev, bool can_sleep);
 void hdmirx_get_colordepth(struct rk_hdmirx_dev *hdmirx_dev);
 
 #endif

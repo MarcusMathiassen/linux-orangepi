@@ -735,6 +735,9 @@ struct rk_hdmirx_dev {
 	bool get_timing;
 	bool cec_enable;
 	bool hpd_on;
+	/* the 5V pin, debounced: written by tx_5v_power_sample() (the hotplug and
+	 * signal works, probe), read lock-free by tx_5v_power_present() */
+	bool tx_5v;
 	bool force_off;
 	u8 hdcp_enable;
 	u32 num_clks;
@@ -768,6 +771,8 @@ void hdmirx_update_bits(struct rk_hdmirx_dev *hdmirx_dev, int reg, u32 mask, u32
 void hdmirx_hpd_config(struct rk_hdmirx_dev *hdmirx_dev, bool en);
 
 bool tx_5v_power_present(struct rk_hdmirx_dev *hdmirx_dev);
+bool tx_5v_power_sample(struct rk_hdmirx_dev *hdmirx_dev);
+void hdmirx_stop_dma(struct rk_hdmirx_dev *hdmirx_dev);
 bool hdmirx_signal_locked(struct rk_hdmirx_dev *hdmirx_dev);
 void hdmirx_plugout(struct rk_hdmirx_dev *hdmirx_dev);
 void process_signal_change(struct rk_hdmirx_dev *hdmirx_dev);

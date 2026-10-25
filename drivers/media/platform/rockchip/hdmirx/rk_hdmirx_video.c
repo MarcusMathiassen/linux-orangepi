@@ -102,7 +102,7 @@ static const struct hdmirx_output_fmt g_out_fmts[] = {
 	}
 };
 
-static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct v4l2_dv_timings *timings, bool from_dma);
+static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct v4l2_dv_timings *timings, bool from_dma, bool can_sleep);
 
 static bool port_no_link(struct rk_hdmirx_dev *hdmirx_dev)
 {
@@ -261,7 +261,7 @@ static void dma_idle_int_handler(struct rk_hdmirx_dev *hdmirx_dev, bool *handled
 		v4l2_dbg(1, debug, v4l2_dev, "%s: last time have no line_flag_irq\n", __func__);
 
 	if (!stream->next_buf) {
-		v4l2_info(v4l2_dev, "%s: dma idle with no next_buf\n", __func__);
+		dev_info_ratelimited(hdmirx_dev->dev, "%s: dma idle with no next_buf\n", __func__);
 		goto DMA_IDLE_OUT;
 	}
 
@@ -295,7 +295,7 @@ static void line_flag_int_handler(struct rk_hdmirx_dev *hdmirx_dev, bool *handle
 
 	stream->line_flag_int_cnt++;
 	if (!(stream->irq_stat & HDMIRX_DMA_IDLE_INT))
-		v4l2_info(v4l2_dev, "%s: last have no dma_idle_irq\n", __func__);
+		dev_info_ratelimited(hdmirx_dev->dev, "%s: last have no dma_idle_irq\n", __func__);
 
 	dma_cfg6 = hdmirx_readl(hdmirx_dev, DMA_CONFIG6);
 
@@ -330,7 +330,7 @@ static void line_flag_int_handler(struct rk_hdmirx_dev *hdmirx_dev, bool *handle
 
 	// Still don't have one? We'll drop the frame. Try again next time.
 	if (!stream->next_buf) {
-		v4l2_info(v4l2_dev, "%s: next_buf NULL, drop the frame!\n", __func__);
+		dev_info_ratelimited(hdmirx_dev->dev, "%s: next_buf NULL, drop the frame!\n", __func__);
 		goto LINE_FLAG_OUT;
 	}
 
@@ -386,6 +386,9 @@ irqreturn_t hdmirx_dma_irq_handler(int irq, void *dev_id)
 
 	dma_stat1 = hdmirx_readl(hdmirx_dev, DMA_STATUS1);
 	dma_stat13 = hdmirx_readl(hdmirx_dev, DMA_STATUS13);
+	/* clear what was read, now: a LINE_FLAG or DMA_IDLE raised while this
+	 * thread runs stays pending instead of being cleared unhandled */
+	hdmirx_writel(hdmirx_dev, DMA_CONFIG5, dma_stat1);
 	// v4l2_dbg(3, debug, v4l2_dev, "dma_irq st1:%#x, st13:%d\n", dma_stat1, dma_stat13);
 
 	if (dma_stat1 & HDMIRX_DMA_IDLE_INT) {
@@ -408,7 +411,6 @@ irqreturn_t hdmirx_dma_irq_handler(int irq, void *dev_id)
 		v4l2_dbg(3, debug, v4l2_dev, "%s: dma irq not handled, dma_stat1:%#x!\n", __func__, dma_stat1);
 
 	stream->irq_stat = dma_stat1;
-	hdmirx_writel(hdmirx_dev, DMA_CONFIG5, 0xffffffff);
 
 	return IRQ_HANDLED;
 }
@@ -419,9 +421,8 @@ static int hdmirx_dqbuf(struct file *file, void *priv, struct v4l2_buffer *p)
 	struct hdmirx_stream *stream = video_drvdata(file);
 	struct rk_hdmirx_dev *hdmirx_dev = stream->hdmirx_dev;
 
-	if (!hdmirx_dev->get_timing)
-		return -EINVAL;
-
+	/* no get_timing check: frames completed before a signal loss stay
+	 * dequeueable (poll reports them, and a failing DQBUF made user space spin) */
 	ret = vb2_ioctl_dqbuf(file, priv, p);
 	hdmirx_dqbuf_get_done_fence(hdmirx_dev);
 
@@ -530,36 +531,50 @@ static void hdmirx_buf_queue(struct vb2_buffer *vb)
 	spin_unlock_irqrestore(&stream->vbq_lock, lock_flags);
 }
 
+static void hdmirx_set_fmt(struct hdmirx_stream *stream, struct v4l2_pix_format_mplane *pixm, bool try);
+
+/*
+ * A buffer too small for what the DMA writes now is refused: the DMA takes
+ * only a base address, so a frame bigger than the buffer (the signal changed
+ * since the format was set) would run past it.
+ */
+static int hdmirx_buf_prepare(struct vb2_buffer *vb)
+{
+	struct hdmirx_stream *stream = vb2_get_drv_priv(vb->vb2_queue);
+	struct rk_hdmirx_dev *hdmirx_dev = stream->hdmirx_dev;
+	struct v4l2_pix_format_mplane need = { .pixelformat = hdmirx_dev->cur_fmt_fourcc };
+	unsigned int i;
+
+	if (!hdmirx_dev->timings.bt.width || !hdmirx_dev->timings.bt.height)
+		return 0;
+	hdmirx_set_fmt(stream, &need, true);
+	for (i = 0; i < vb->num_planes && i < need.num_planes; i++)
+		if (vb2_plane_size(vb, i) < need.plane_fmt[i].sizeimage) {
+			dev_err_ratelimited(hdmirx_dev->dev, "%s: plane %u is %lu bytes, the signal needs %u\n",
+					    __func__, i, vb2_plane_size(vb, i), need.plane_fmt[i].sizeimage);
+			return -EINVAL;
+		}
+	return 0;
+}
+
 static void hdmirx_stop_streaming(struct vb2_queue *queue)
 {
 	struct hdmirx_stream *stream = vb2_get_drv_priv(queue);
 	struct rk_hdmirx_dev *hdmirx_dev = stream->hdmirx_dev;
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
-	int ret;
 
 	v4l2_info(v4l2_dev, "stream start stopping\n");
 	mutex_lock(&hdmirx_dev->stream_lock);
-	stream->stopping = true;
-
-	/* wait last irq to return the buffer */
-	ret = wait_event_timeout(stream->wq_stopped, stream->stopping != true,
-			msecs_to_jiffies(50));
-	if (!ret) {
-		v4l2_err(v4l2_dev, "%s wait last irq timeout, return bufs!\n",
-				__func__);
-		stream->stopping = false;
-	}
-
-	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG6, HDMIRX_DMA_EN, 0);
-	hdmirx_writel(hdmirx_dev, DMA_CONFIG5, 0xffffffff);
-	hdmirx_update_bits(hdmirx_dev, DMA_CONFIG4,
-			   LINE_FLAG_INT_EN |
-			   HDMIRX_DMA_IDLE_INT |
-			   HDMIRX_LOCK_DISABLE_INT |
-			   LAST_FRAME_AXI_UNFINISH_INT_EN |
-			   FIFO_OVERFLOW_INT_EN |
-			   FIFO_UNDERFLOW_INT_EN |
-			   HDMIRX_AXI_ERROR_INT_EN, 0);
+	/*
+	 * The buffers go back only once nothing can write them: the DMA stopped
+	 * and its frame in flight abandoned (a reset), and a DMA IRQ thread that
+	 * already started (it may complete curr_buf) finished. Returning them on
+	 * a 50 ms timeout with the DMA still writing let a frame land in pages
+	 * freed by REQBUFS(0) (a kernel stack, 1.mota.to 2026-10-11).
+	 */
+	hdmirx_stop_dma(hdmirx_dev);
+	synchronize_irq(hdmirx_dev->dma_irq);
+	stream->stopping = false;
 	return_all_buffers(stream, VB2_BUF_STATE_ERROR);
 	sip_hdmirx_config(HDMIRX_INFO_NOTIFY, 0, DMA_CONFIG6, 0);
 	sip_hdmirx_config(HDMIRX_AUTO_TOUCH_EN, 0, 0, 0);
@@ -648,6 +663,7 @@ static int hdmirx_start_streaming(struct vb2_queue *queue, unsigned int count)
 // ---------------------- vb2 queue -------------------------
 static struct vb2_ops hdmirx_vb2_ops = {
 	.queue_setup = hdmirx_queue_setup,
+	.buf_prepare = hdmirx_buf_prepare,
 	.buf_queue = hdmirx_buf_queue,
 	.wait_prepare = vb2_ops_wait_prepare,
 	.wait_finish = vb2_ops_wait_finish,
@@ -956,8 +972,14 @@ static int hdmirx_g_fmt_vid_cap_mplane(struct file *file, void *fh,
 {
 	struct hdmirx_stream *stream = video_drvdata(file);
 	struct rk_hdmirx_dev *hdmirx_dev = stream->hdmirx_dev;
-	struct v4l2_pix_format_mplane pixm;
+	struct v4l2_pix_format_mplane pixm = {};
 
+	/* streaming: the format the buffers were made for, unchanged (setting it
+	 * from the signal here re-derived stream->pixm under a running capture) */
+	if (vb2_is_busy(&stream->buf_queue)) {
+		f->fmt.pix_mp = stream->pixm;
+		return 0;
+	}
 	pixm.pixelformat = hdmirx_dev->cur_fmt_fourcc;
 	hdmirx_set_fmt(stream, &pixm, false);
 	f->fmt.pix_mp = stream->pixm;
@@ -1085,7 +1107,7 @@ static int hdmirx_query_dv_timings(struct file *file, void *_fh, struct v4l2_dv_
 		return -ENOLCK;
 	}
 
-	ret = hdmirx_get_detected_timings(hdmirx_dev, timings, false);
+	ret = hdmirx_get_detected_timings(hdmirx_dev, timings, false, false);   /* an ioctl: no retry sleeps under vlock */
 	if (ret)
 		return ret;
 
@@ -1258,7 +1280,12 @@ void hdmirx_get_colordepth(struct rk_hdmirx_dev *hdmirx_dev)
 	v4l2_dbg(1, debug, v4l2_dev, "%s: color_depth: %d, reg_val:%d\n", __func__, hdmirx_dev->color_depth, color_depth_reg);
 }
 
-void hdmirx_get_pix_fmt(struct rk_hdmirx_dev *hdmirx_dev)
+/*
+ * can_sleep: a work may wait out an unsettled DMA_STATUS11 (up to 10 x 200 ms);
+ * the hard IRQ and the ioctls (under vlock, which the capture's poll takes)
+ * must not, and take the RGB default at once.
+ */
+void hdmirx_get_pix_fmt(struct rk_hdmirx_dev *hdmirx_dev, bool can_sleep)
 {
 	u32 val;
 	int timeout = 10;
@@ -1316,7 +1343,7 @@ try_loop:
 		break;
 
 	default:
-		if (timeout-- > 0) {
+		if (can_sleep && timeout-- > 0) {
 			usleep_range(200 * 1000, 200 * 1010);
 			v4l2_err(v4l2_dev, "%s: get format failed, read again!\n", __func__);
 			goto try_loop;
@@ -1457,7 +1484,7 @@ void hdmirx_get_color_range(struct rk_hdmirx_dev *hdmirx_dev)
 		(hdmirx_dev->cur_color_range == HDMIRX_FULL_RANGE ? "full" : "limit"));
 }
 
-static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct v4l2_dv_timings *timings, bool from_dma)
+static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct v4l2_dv_timings *timings, bool from_dma, bool can_sleep)
 {
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
 	struct v4l2_bt_timings *bt = &timings->bt;
@@ -1470,7 +1497,7 @@ static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct 
 
 	val = hdmirx_readl(hdmirx_dev, DMA_STATUS11);
 	field_type = (val & HDMIRX_TYPE_MASK) >> 7;
-	hdmirx_get_pix_fmt(hdmirx_dev);
+	hdmirx_get_pix_fmt(hdmirx_dev, can_sleep);
 	/* VIC must be read before color range: the RGB default-range
 	 * heuristic in hdmirx_get_color_range() depends on cur_vic.
 	 */
@@ -1523,7 +1550,7 @@ static int hdmirx_try_to_get_timings(struct rk_hdmirx_dev *hdmirx_dev,
 	last_fourcc = 0;
 
 	for (i = 0; i < try_cnt; i++) {
-		ret = hdmirx_get_detected_timings(hdmirx_dev, timings, from_dma);
+		ret = hdmirx_get_detected_timings(hdmirx_dev, timings, from_dma, true);
 
 		if ((last_w == 0) && (last_h == 0)) {
 			last_w = bt->width;
