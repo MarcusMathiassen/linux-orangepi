@@ -678,22 +678,36 @@ static void hdmirx_set_ddr_store_fmt(struct rk_hdmirx_dev *hdmirx_dev)
 		 hdmirx_readl(hdmirx_dev, DMA_CONFIG1));
 }
 
-static int hdmirx_wait_lock_and_get_timing(struct rk_hdmirx_dev *hdmirx_dev)
+/*
+ * phy_skipped: the caller left the PHY as it was because the link was locked.
+ * If the lock goes anyway (a source retrains the link on an HDR toggle), the
+ * PHY is configured as soon as that unlock holds, not at the retry ~2.6 s on
+ * (an HDR toggle took 3.4 s that way, 1.mota.to 2026-10-25).
+ */
+static int hdmirx_wait_lock_and_get_timing(struct rk_hdmirx_dev *hdmirx_dev, bool phy_skipped)
 {
-	u32 i, j = 0;
+	u32 i, j = 0, k = 0;
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
 
 	for (i = 1; i < WAIT_SIGNAL_LOCK_TIME; i++) {
-		if (hdmirx_signal_locked(hdmirx_dev))
+		if (hdmirx_signal_locked(hdmirx_dev)) {
 			j++;
-		else
+			k = 0;
+		} else {
 			j = 0;
+			k++;
+		}
 
 		if (j > WAIT_LOCK_STABLE_TIME)
 			break;
 
-		if (i % NO_LOCK_CFG_RETRY_TIME == 0)
+		if (phy_skipped && k > WAIT_LOCK_STABLE_TIME) {
+			v4l2_info(v4l2_dev, "%s: lock lost after all, PHY configured\n", __func__);
 			hdmirx_phy_config(hdmirx_dev);
+			phy_skipped = false;
+		} else if (i % NO_LOCK_CFG_RETRY_TIME == 0) {
+			hdmirx_phy_config(hdmirx_dev);
+		}
 
 		if (!tx_5v_power_sample(hdmirx_dev)) {
 			//v4l2_err(v4l2_dev, "%s HDMI pull out, return!\n", __func__);
@@ -1252,7 +1266,7 @@ static void hdmirx_plugin(struct rk_hdmirx_dev *hdmirx_dev)
 	hdmirx_hpd_ctrl(hdmirx_dev, true);
 	hdmirx_phy_config(hdmirx_dev);
 	hdmirx_audio_setup(hdmirx_dev);
-	ret = hdmirx_wait_lock_and_get_timing(hdmirx_dev);
+	ret = hdmirx_wait_lock_and_get_timing(hdmirx_dev, false);
 	if (ret) {
 		hdmirx_plugout(hdmirx_dev);
 		hdmirx_queue_dwork(hdmirx_dev,
@@ -1384,7 +1398,7 @@ static void hdmirx_delayed_work_res_change(struct work_struct *work)
 		if (!locked)
 			hdmirx_phy_config(hdmirx_dev);
 		hdmirx_audio_setup(hdmirx_dev);
-		ret = hdmirx_wait_lock_and_get_timing(hdmirx_dev);
+		ret = hdmirx_wait_lock_and_get_timing(hdmirx_dev, locked);
 		if (ret) {
 			hdmirx_plugout(hdmirx_dev);
 			hdmirx_queue_dwork(hdmirx_dev,
