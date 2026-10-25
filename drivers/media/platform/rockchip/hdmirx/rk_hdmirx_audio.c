@@ -160,7 +160,7 @@ void hdmirx_audio_set_state(struct rk_hdmirx_dev *hdmirx_dev, enum audio_stat st
 		hdmirx_update_bits(hdmirx_dev, GLOBAL_SWENABLE, AUDIO_ENABLE, 0);
 		break;
 	case AUDIO_ON:
-		schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+		hdmirx_queue_dwork(hdmirx_dev,
 					 &hdmirx_dev->delayed_work_audio, HZ / 2);
 		break;
 	default:
@@ -193,6 +193,13 @@ void hdmirx_audio_setup(struct rk_hdmirx_dev *hdmirx_dev)
 	as->init_state = INIT_FIFO_STATE*4;
 	as->fifo_int = false;
 	as->audio_enabled = false;
+	/* a new link starts without audio: "on" from the last one is reported
+	 * off, so the next "audio on" is seen (and not skipped as no change) */
+	if (hdmirx_dev->audio_present) {
+		hdmirx_audio_handle_plugged_change(hdmirx_dev, 0);
+		process_audio_change(hdmirx_dev);
+		hdmirx_dev->audio_present = false;
+	}
 	hdmirx_audio_set_fs(hdmirx_dev, 44100);
 	/* Disable audio domain */
 	hdmirx_update_bits(hdmirx_dev, GLOBAL_SWENABLE, AUDIO_ENABLE, 0);
@@ -403,7 +410,7 @@ void hdmirx_delayed_work_audio(struct work_struct *work)
 	hdmirx_update_bits(hdmirx_dev, AUDIO_PROC_CONFIG0, I2S_EN, sample_flat ? 0 : I2S_EN);
 
 exit:
-	schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+	hdmirx_queue_dwork(hdmirx_dev,
 			&hdmirx_dev->delayed_work_audio,
 			msecs_to_jiffies(delay));
 }

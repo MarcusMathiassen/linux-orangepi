@@ -157,7 +157,7 @@ static int hdmirx_cec_enable(struct cec_adapter *adap, bool enable)
 
 	if (!enable) {
 		hdmirx_cec_write(cec, CEC_INT_MASK_N, 0);
-		hdmirx_cec_write(cec, CEC_INT_CLEAR, 0);
+		hdmirx_cec_write(cec, CEC_INT_CLEAR, ~0);   /* write-1-to-clear: 0 left them pending */
 		if (cec->ops->disable)
 			cec->ops->disable(cec->hdmirx);
 	} else {
@@ -271,7 +271,9 @@ struct hdmirx_cec *rk_hdmirx_cec_register(struct hdmirx_cec_data *data)
 	if (ret) {
 		dev_err(cec->dev, "cec irq request failed!\n");
 		cec_notifier_cec_adap_unregister(cec->notify, cec->adap);
-		dev_err(cec->dev, "request cec irq thread failed!\n");
+		/* registered: unregister frees it, and the devm delete must not */
+		devm_remove_action(cec->dev, hdmirx_cec_del, cec);
+		cec_unregister_adapter(cec->adap);
 		return NULL;
 	}
 
@@ -292,6 +294,8 @@ void rk_hdmirx_cec_unregister(struct hdmirx_cec *cec)
 	if (!cec)
 		return;
 
+	/* the IRQ's dev_id is the adapter unregister frees: release it first */
+	devm_free_irq(cec->dev, cec->irq, cec->adap);
 	cec_notifier_cec_adap_unregister(cec->notify, cec->adap);
 	cec_unregister_adapter(cec->adap);
 }

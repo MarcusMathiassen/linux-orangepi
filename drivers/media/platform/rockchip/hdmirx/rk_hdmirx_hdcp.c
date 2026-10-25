@@ -222,8 +222,8 @@ static ssize_t enable_store(struct device *device,
 	if (kstrtoint(buf, 10, &enable))
 		return -EINVAL;
 
-	if (enable > hdcp->hdcp_support)
-		return count;
+	if (enable < 0 || enable > hdcp->hdcp_support)
+		return -EINVAL;
 
 	if (hdcp->enable != enable) {
 		rk_hdmirx_hdcp2_hpd_config(hdcp, false);
@@ -395,6 +395,7 @@ static struct rk_hdmirx_hdcp *rk_hdmirx_hdcp_register(struct rk_hdmirx_hdcp *hdc
 
 	if (misc_register(&hdcp->mdev)) {
 		dev_err(hdcp->dev, "HDCP: Could not add character driver\n");
+		g_hdmirx_hdcp = NULL;
 		return NULL;
 	}
 
@@ -419,7 +420,7 @@ static struct rk_hdmirx_hdcp *rk_hdmirx_hdcp_register(struct rk_hdmirx_hdcp *hdc
 	ret = device_create_file(hdcp->mdev.this_device, &dev_attr_test_key1x);
 	if (ret) {
 		dev_err(hdcp->dev, "HDCP: Could not add sys file test_key1x\n");
-		goto error2;
+		goto error3;
 	}
 
 	hdcp->hdcp_start = rk_hdmirx_hdcp_start;
@@ -428,12 +429,15 @@ static struct rk_hdmirx_hdcp *rk_hdmirx_hdcp_register(struct rk_hdmirx_hdcp *hdc
 	dev_info(hdcp->dev, "%s success\n", __func__);
 	return hdcp;
 
+error3:
+	device_remove_file(hdcp->mdev.this_device, &dev_attr_support);
 error2:
 	device_remove_file(hdcp->mdev.this_device, &dev_attr_status);
 error1:
 	device_remove_file(hdcp->mdev.this_device, &dev_attr_enable);
 error0:
 	misc_deregister(&hdcp->mdev);
+	g_hdmirx_hdcp = NULL;   /* devm frees it: the sysfs handlers must not find it */
 	return NULL;
 }
 
@@ -459,4 +463,5 @@ void hdmirx_hdcp_unregister(struct rk_hdmirx_hdcp *hdcp)
 	device_remove_file(hdcp->mdev.this_device, &dev_attr_support);
 	device_remove_file(hdcp->mdev.this_device, &dev_attr_test_key1x);
 	misc_deregister(&hdcp->mdev);
+	g_hdmirx_hdcp = NULL;
 }

@@ -652,6 +652,8 @@ struct hdmirx_stream {
 	bool stopping;
 	wait_queue_head_t wq_stopped;
 	u32 frame_idx;
+	/* when the DMA IRQ fired, taken in its hard half: the frame's timestamp */
+	u64 irq_ts;
 	u32 line_flag_int_cnt;
 	u32 irq_stat;
 };
@@ -738,6 +740,11 @@ struct rk_hdmirx_dev {
 	/* the 5V pin, debounced: written by tx_5v_power_sample() (the hotplug and
 	 * signal works, probe), read lock-free by tx_5v_power_present() */
 	bool tx_5v;
+	/* set once under work_lock on remove: no work is queued or runs after */
+	bool shutdown;
+	/* asks a running lock wait (hdmirx_wait_lock_and_get_timing) to give up,
+	 * so the EDID writers and suspend need not wait seconds for it */
+	bool abort_lock_wait;
 	bool force_off;
 	u8 hdcp_enable;
 	u32 num_clks;
@@ -773,6 +780,7 @@ void hdmirx_hpd_config(struct rk_hdmirx_dev *hdmirx_dev, bool en);
 bool tx_5v_power_present(struct rk_hdmirx_dev *hdmirx_dev);
 bool tx_5v_power_sample(struct rk_hdmirx_dev *hdmirx_dev);
 void hdmirx_stop_dma(struct rk_hdmirx_dev *hdmirx_dev);
+bool hdmirx_queue_dwork(struct rk_hdmirx_dev *hdmirx_dev, struct delayed_work *dwork, unsigned long delay);
 bool hdmirx_signal_locked(struct rk_hdmirx_dev *hdmirx_dev);
 void hdmirx_plugout(struct rk_hdmirx_dev *hdmirx_dev);
 void process_signal_change(struct rk_hdmirx_dev *hdmirx_dev);

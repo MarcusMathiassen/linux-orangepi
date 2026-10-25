@@ -209,6 +209,14 @@ static void hdmirx_reset_dma(struct rk_hdmirx_dev *hdmirx_dev)
 
 static void hdmirx_dma_config(struct rk_hdmirx_dev *hdmirx_dev);
 
+/* every work goes through here: none is queued once remove has begun */
+bool hdmirx_queue_dwork(struct rk_hdmirx_dev *hdmirx_dev, struct delayed_work *dwork, unsigned long delay)
+{
+	if (READ_ONCE(hdmirx_dev->shutdown))
+		return false;
+	return schedule_delayed_work_on(hdmirx_dev->bound_cpu, dwork, delay);
+}
+
 /*
  * Stop the capture DMA for good: no new frame, no interrupt, and the frame in
  * flight abandoned (the reset) so that no buffer is written after this
@@ -691,6 +699,8 @@ static int hdmirx_wait_lock_and_get_timing(struct rk_hdmirx_dev *hdmirx_dev)
 			//v4l2_err(v4l2_dev, "%s HDMI pull out, return!\n", __func__);
 			return -1;
 		}
+		if (READ_ONCE(hdmirx_dev->abort_lock_wait))
+			return -1;
 
 		hdmirx_tmds_clk_ratio_config(hdmirx_dev);
 	}
@@ -828,9 +838,11 @@ void process_signal_change(struct rk_hdmirx_dev *hdmirx_dev)
 		hdmirx_dev->hdmirx_fence = NULL;
 	}
 	spin_unlock_irqrestore(&hdmirx_dev->fence_lock, lock_flags);
-	schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+	/* the lock wait itself waits for a stable lock; a second here only added
+	 * to every change (an HDR toggle cost ~1.8 s) */
+	hdmirx_queue_dwork(hdmirx_dev,
 			&hdmirx_dev->delayed_work_res_change,
-			msecs_to_jiffies(1000));
+			msecs_to_jiffies(200));
 }
 
 /* Interrupt sources that flap when a high-rate TMDS lock is marginal. */
@@ -874,7 +886,7 @@ static void hdmirx_signal_change_handle(struct rk_hdmirx_dev *hdmirx_dev)
 	hdmirx_update_bits(hdmirx_dev, AVPUNIT_1_INT_MASK_N,
 			   HDMIRX_SIGNAL_CHANGE_AVP1, 0);
 
-	schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+	hdmirx_queue_dwork(hdmirx_dev,
 				 &hdmirx_dev->delayed_work_signal_check,
 				 msecs_to_jiffies(signal_debounce_ms));
 }
@@ -889,7 +901,7 @@ static void hdmirx_delayed_work_signal_check(struct work_struct *work)
 	mutex_lock(&hdmirx_dev->work_lock);
 
 	/* Already torn down (or never up) elsewhere - nothing to debounce. */
-	if (!hdmirx_dev->get_timing) {
+	if (hdmirx_dev->shutdown || !hdmirx_dev->get_timing) {
 		mutex_unlock(&hdmirx_dev->work_lock);
 		return;
 	}
@@ -897,6 +909,11 @@ static void hdmirx_delayed_work_signal_check(struct work_struct *work)
 	if (!tx_5v_power_sample(hdmirx_dev) || !hdmirx_signal_locked(hdmirx_dev)) {
 		v4l2_dbg(1, debug, v4l2_dev,
 			 "%s: signal loss confirmed, tearing down\n", __func__);
+		process_signal_change(hdmirx_dev);
+	} else if (hdmirx_geometry_changed(hdmirx_dev)) {
+		/* still locked, but a different frame: a mode change at the same
+		 * TMDS clock (1080p120 -> 2160p30), which a lock test calls a glitch */
+		v4l2_info(v4l2_dev, "%s: locked, but the geometry changed\n", __func__);
 		process_signal_change(hdmirx_dev);
 	} else {
 		v4l2_dbg(1, debug, v4l2_dev,
@@ -910,6 +927,10 @@ static void hdmirx_delayed_work_signal_check(struct work_struct *work)
 				   HDMIRX_SIGNAL_CHANGE_MU2, HDMIRX_SIGNAL_CHANGE_MU2);
 		hdmirx_update_bits(hdmirx_dev, AVPUNIT_1_INT_MASK_N,
 				   HDMIRX_SIGNAL_CHANGE_AVP1, HDMIRX_SIGNAL_CHANGE_AVP1);
+		/* a hard-IRQ teardown (pkt_0) between the test and the re-arm left
+		 * its masks off: put them back off */
+		if (!READ_ONCE(hdmirx_dev->get_timing))
+			hdmirx_interrupts_setup(hdmirx_dev, false);
 	}
 
 	mutex_unlock(&hdmirx_dev->work_lock);
@@ -949,7 +970,7 @@ static void avpunit_1_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 		hdmirx_update_bits(hdmirx_dev, AVPUNIT_1_INT_MASK_N,
 				   DEFRAMER_VSYNC_THR_REACHED_MASK_N,
 				   0);
-		schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+		hdmirx_queue_dwork(hdmirx_dev,
 				&hdmirx_dev->delayed_work_audio, HZ / 2);
 		*handled = true;
 	}
@@ -1030,8 +1051,11 @@ static void pkt_0_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 	u32 pre_color_range = hdmirx_dev->cur_color_range;
 	u32 pre_color_space = hdmirx_dev->cur_color_space;
 	u32 pre_eotf = hdmirx_dev->cur_eotf;
+	u32 vic;
 
 	if (status & (PKTDEC_AVIIF_CHG_IRQ | PKTDEC_DRMIF_CHG_IRQ)) {
+		hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PH2_1);
+		vic = hdmirx_readl(hdmirx_dev, PKTDEC_AVIIF_PB7_4) & VIC_VAL_MASK;
 		/* order matters: hdmirx_get_color_range() reads pix_fmt AND
 		 * cur_color_space (sYCC/AdobeYCC/AdobeRGB imply full range) */
 		hdmirx_get_pix_fmt(hdmirx_dev, false);   /* hard IRQ: no retry sleeps */
@@ -1041,7 +1065,8 @@ static void pkt_0_int_handler(struct rk_hdmirx_dev *hdmirx_dev,
 		if (hdmirx_dev->cur_fmt_fourcc != pre_fmt_fourcc ||
 		    hdmirx_dev->cur_color_range != pre_color_range ||
 		    hdmirx_dev->cur_color_space != pre_color_space ||
-		    hdmirx_dev->cur_eotf != pre_eotf) {
+		    hdmirx_dev->cur_eotf != pre_eotf ||
+		    (hdmirx_dev->get_timing && vic != hdmirx_dev->cur_vic)) {
 			process_signal_change(hdmirx_dev);
 		}
 		v4l2_dbg(2, debug, v4l2_dev, "%s: ptk0_st:%#x\n",
@@ -1215,7 +1240,7 @@ static void hdmirx_plugin(struct rk_hdmirx_dev *hdmirx_dev)
 
 	rockchip_set_system_status(SYS_STATUS_HDMIRX);
 	cpu_latency_qos_update_request(&hdmirx_dev->pm_qos, 0);
-	schedule_delayed_work_on(hdmirx_dev->bound_cpu, &hdmirx_dev->delayed_work_heartbeat, msecs_to_jiffies(10));
+	hdmirx_queue_dwork(hdmirx_dev, &hdmirx_dev->delayed_work_heartbeat, msecs_to_jiffies(10));
 	sip_wdt_config(WDT_START, 0, 0, 0);
 	hdmirx_set_cpu_limit_freq(hdmirx_dev);
 	hdmirx_interrupts_setup(hdmirx_dev, false);
@@ -1230,7 +1255,7 @@ static void hdmirx_plugin(struct rk_hdmirx_dev *hdmirx_dev)
 	ret = hdmirx_wait_lock_and_get_timing(hdmirx_dev);
 	if (ret) {
 		hdmirx_plugout(hdmirx_dev);
-		schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+		hdmirx_queue_dwork(hdmirx_dev,
 					 &hdmirx_dev->delayed_work_hotplug,
 					 msecs_to_jiffies(1000));
 		return;
@@ -1290,17 +1315,32 @@ static void hdmirx_delayed_work_hotplug(struct work_struct *work)
 	bool plugin;
 
 	mutex_lock(&hdmirx_dev->work_lock);
-	hdmirx_dev->get_timing = false;
-	sip_hdmirx_config(HDMIRX_INFO_NOTIFY, 0, DMA_CONFIG6, 0);
-	v4l2_event_queue(&stream->vdev, &evt_signal_lost);
+	if (hdmirx_dev->shutdown) {
+		mutex_unlock(&hdmirx_dev->work_lock);
+		return;
+	}
 	plugin = tx_5v_power_sample(hdmirx_dev);
 	v4l2_ctrl_s_ctrl(hdmirx_dev->detect_tx_5v_ctrl, plugin);
 	v4l2_dbg(1, debug, v4l2_dev, "%s: plugin:%d\n", __func__, plugin);
 
-	if (plugin)
+	/* an edge on the 5V pin with the link still up and locked (a bounce):
+	 * nothing to redo; a full plugin is a PHY reset and >1.3 s of no video */
+	if (plugin && hdmirx_dev->hpd_on && hdmirx_dev->get_timing &&
+	    hdmirx_signal_locked(hdmirx_dev)) {
+		v4l2_dbg(1, debug, v4l2_dev, "%s: 5V edge, link still up\n", __func__);
+		mutex_unlock(&hdmirx_dev->work_lock);
+		return;
+	}
+
+	hdmirx_dev->get_timing = false;
+	sip_hdmirx_config(HDMIRX_INFO_NOTIFY, 0, DMA_CONFIG6, 0);
+	v4l2_event_queue(&stream->vdev, &evt_signal_lost);
+	if (plugin) {
+		hdmirx_stop_dma(hdmirx_dev);   /* not writing while the PHY resets */
 		hdmirx_plugin(hdmirx_dev);
-	else
+	} else {
 		hdmirx_plugout(hdmirx_dev);
+	}
 
 	mutex_unlock(&hdmirx_dev->work_lock);
 }
@@ -1323,22 +1363,31 @@ static void hdmirx_delayed_work_res_change(struct work_struct *work)
 	int ret;
 
 	mutex_lock(&hdmirx_dev->work_lock);
+	if (hdmirx_dev->shutdown) {
+		mutex_unlock(&hdmirx_dev->work_lock);
+		return;
+	}
 	sip_hdmirx_config(HDMIRX_INFO_NOTIFY, 0, DMA_CONFIG6, 0);
 	plugin = tx_5v_power_sample(hdmirx_dev);
 	v4l2_dbg(1, debug, v4l2_dev, "%s: plugin:%d\n", __func__, plugin);
 	if (plugin) {
+		/* an InfoFrame-only change (HDR on/off) keeps the TMDS lock: the
+		 * PHY needs no retraining, which would drop the link itself */
+		const bool locked = hdmirx_signal_locked(hdmirx_dev);
+
 		hdmirx_submodule_init(hdmirx_dev);
 		hdmirx_update_bits(hdmirx_dev, SCDC_CONFIG, POWERPROVIDED,
 					POWERPROVIDED);
 		if (hdmirx_dev->hdcp && hdmirx_dev->hdcp->hdcp_start)
 			hdmirx_dev->hdcp->hdcp_start(hdmirx_dev->hdcp);
 		hdmirx_hpd_ctrl(hdmirx_dev, true);
-		hdmirx_phy_config(hdmirx_dev);
+		if (!locked)
+			hdmirx_phy_config(hdmirx_dev);
 		hdmirx_audio_setup(hdmirx_dev);
 		ret = hdmirx_wait_lock_and_get_timing(hdmirx_dev);
 		if (ret) {
 			hdmirx_plugout(hdmirx_dev);
-			schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+			hdmirx_queue_dwork(hdmirx_dev,
 						 &hdmirx_dev->delayed_work_hotplug,
 						 msecs_to_jiffies(1000));
 		} else {
@@ -1355,7 +1404,7 @@ static void hdmirx_delayed_work_heartbeat(struct work_struct *work)
 	struct delayed_work *dwork = to_delayed_work(work);
 	struct rk_hdmirx_dev *hdmirx_dev = container_of(dwork, struct rk_hdmirx_dev, delayed_work_heartbeat);
 	queue_work_on(hdmirx_dev->wdt_cfg_bound_cpu,  system_highpri_wq, &hdmirx_dev->work_wdt_config);
-	schedule_delayed_work_on(hdmirx_dev->bound_cpu, &hdmirx_dev->delayed_work_heartbeat, HZ);
+	hdmirx_queue_dwork(hdmirx_dev, &hdmirx_dev->delayed_work_heartbeat, HZ);
 }
 
 static void hdmirx_work_wdt_config(struct work_struct *work)
@@ -1384,7 +1433,7 @@ static irqreturn_t hdmirx_5v_det_irq_handler(int irq, void *dev_id)
 	val = gpiod_get_value(hdmirx_dev->hdmirx_det_gpio);
 	v4l2_dbg(3, debug, &hdmirx_dev->v4l2_dev, "%s: 5v:%d\n", __func__, val);
 
-	schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+	hdmirx_queue_dwork(hdmirx_dev,
 			&hdmirx_dev->delayed_work_hotplug, msecs_to_jiffies(10));
 
 	return IRQ_HANDLED;
@@ -1553,13 +1602,22 @@ static int hdmirx_runtime_suspend(struct device *dev)
 	struct rk_hdmirx_dev *hdmirx_dev = dev_get_drvdata(dev);
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
 
+	/* the works wait on the hdmi IRQ (CR done, AVI received): cancel them
+	 * before it goes, a running lock wait told to give up */
+	WRITE_ONCE(hdmirx_dev->abort_lock_wait, true);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_signal_check);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
+
 	disable_irq(hdmirx_dev->hdmi_irq);
 	disable_irq(hdmirx_dev->dma_irq);
 	sip_fiq_control(RK_SIP_FIQ_CTRL_FIQ_DIS, RK_IRQ_HDMIRX_HDMI, 0);
 
+	/* again: an IRQ may have queued one before it was disabled */
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_signal_check);
+	WRITE_ONCE(hdmirx_dev->abort_lock_wait, false);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_audio);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_heartbeat);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_cec);
@@ -1640,20 +1698,42 @@ static int hdmirx_runtime_resume(struct device *dev)
 	regmap_write(hdmirx_dev->vo1_grf, VO1_GRF_VO1_CON1,
 		     HDCP1_P0_GPIO_IN_SEL | HDCP1_P0_GPIO_IN_SEL << 16);
 	if (hdmirx_dev->initialized)
-		schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+		hdmirx_queue_dwork(hdmirx_dev,
 				&hdmirx_dev->delayed_work_hotplug,
 				msecs_to_jiffies(20));
 	else
-		schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+		hdmirx_queue_dwork(hdmirx_dev,
 				&hdmirx_dev->delayed_work_hotplug,
 				msecs_to_jiffies(2000));
 
 	return 0;
 }
 
+/* the 5V IRQ reads DMA_CONFIG6 and queues the hotplug work: not while the
+ * clocks are gated for a system sleep */
+static int hdmirx_suspend(struct device *dev)
+{
+	struct rk_hdmirx_dev *hdmirx_dev = dev_get_drvdata(dev);
+	int ret;
+
+	disable_irq(hdmirx_dev->det_irq);
+	ret = pm_runtime_force_suspend(dev);
+	if (ret)
+		enable_irq(hdmirx_dev->det_irq);
+	return ret;
+}
+
+static int hdmirx_resume(struct device *dev)
+{
+	struct rk_hdmirx_dev *hdmirx_dev = dev_get_drvdata(dev);
+	int ret = pm_runtime_force_resume(dev);
+
+	enable_irq(hdmirx_dev->det_irq);
+	return ret;
+}
+
 static const struct dev_pm_ops rk_hdmirx_pm_ops = {
-	SET_SYSTEM_SLEEP_PM_OPS(pm_runtime_force_suspend,
-				pm_runtime_force_resume)
+	SET_SYSTEM_SLEEP_PM_OPS(hdmirx_suspend, hdmirx_resume)
 	SET_RUNTIME_PM_OPS(hdmirx_runtime_suspend, hdmirx_runtime_resume, NULL)
 };
 
@@ -1703,17 +1783,23 @@ static ssize_t edid_store(struct device *dev,
 		return count;
 
 	if (hdmirx_dev->edid_version != edid) {
+		/*
+		 * Flush any in-flight plug/res-change worker (they take
+		 * work_lock; a lock wait is told to give up) before the IRQs
+		 * they wait on go, then hold work_lock so the plugout/EDID
+		 * rewrite cannot race a worker re-arming the PHY.
+		 */
+		WRITE_ONCE(hdmirx_dev->abort_lock_wait, true);
+		cancel_delayed_work_sync(&hdmirx_dev->delayed_work_signal_check);
+		cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
+		cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
+
 		disable_irq(hdmirx_dev->hdmi_irq);
 		disable_irq(hdmirx_dev->dma_irq);
 		sip_fiq_control(RK_SIP_FIQ_CTRL_FIQ_DIS, RK_IRQ_HDMIRX_HDMI, 0);
-
-		/*
-		 * Flush any in-flight plug/res-change worker (they take
-		 * work_lock) before reconfiguring, then hold work_lock so the
-		 * plugout/EDID rewrite cannot race a worker re-arming the PHY.
-		 */
 		cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
 		cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
+		WRITE_ONCE(hdmirx_dev->abort_lock_wait, false);
 
 		mutex_lock(&hdmirx_dev->work_lock);
 		if (tx_5v_power_present(hdmirx_dev))
@@ -1725,7 +1811,7 @@ static ssize_t edid_store(struct device *dev,
 		enable_irq(hdmirx_dev->hdmi_irq);
 		enable_irq(hdmirx_dev->dma_irq);
 		sip_fiq_control(RK_SIP_FIQ_CTRL_FIQ_EN, RK_IRQ_HDMIRX_HDMI, 0);
-		schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+		hdmirx_queue_dwork(hdmirx_dev,
 					 &hdmirx_dev->delayed_work_hotplug,
 					 msecs_to_jiffies(1000));
 	}
@@ -1961,7 +2047,26 @@ static const struct hdmirx_reg_table hdmirx_ctrl_table[] = {
 	{0x5104, 0x5104, HDMIRX_ATTR_RW},
 };
 
-static int hdmirx_ctrl_show(struct seq_file *s, void *v)
+/* debugfs touches registers: only while powered, and not under a work
+ * (the PHY CR channel and the interrupt status are shared with them) */
+static int hdmirx_dbg_enter(struct rk_hdmirx_dev *hdmirx_dev)
+{
+	if (pm_runtime_get_if_active(hdmirx_dev->dev, false) <= 0)
+		return -EAGAIN;
+	mutex_lock(&hdmirx_dev->work_lock);
+	return 0;
+}
+
+static void hdmirx_dbg_leave(struct rk_hdmirx_dev *hdmirx_dev)
+{
+	mutex_unlock(&hdmirx_dev->work_lock);
+	pm_runtime_put(hdmirx_dev->dev);
+}
+
+static ssize_t hdmirx_ctrl_write_locked(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
+static ssize_t hdmirx_phy_write_locked(struct file *file, const char __user *buf, size_t count, loff_t *ppos);
+
+static int hdmirx_ctrl_show_locked(struct seq_file *s, void *v)
 {
 	struct rk_hdmirx_dev *hdmirx_dev = s->private;
 	u32 i = 0, j = 0, val = 0;
@@ -1987,13 +2092,37 @@ static int hdmirx_ctrl_show(struct seq_file *s, void *v)
 	return 0;
 }
 
+static int hdmirx_ctrl_show(struct seq_file *s, void *v)
+{
+	struct rk_hdmirx_dev *hdmirx_dev = s->private;
+	int ret = hdmirx_dbg_enter(hdmirx_dev);
+
+	if (ret)
+		return ret;
+	ret = hdmirx_ctrl_show_locked(s, v);
+	hdmirx_dbg_leave(hdmirx_dev);
+	return ret;
+}
+
+static ssize_t hdmirx_ctrl_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+	struct rk_hdmirx_dev *hdmirx_dev = ((struct seq_file *)file->private_data)->private;
+	ssize_t ret = hdmirx_dbg_enter(hdmirx_dev);
+
+	if (ret)
+		return ret;
+	ret = hdmirx_ctrl_write_locked(file, buf, count, ppos);
+	hdmirx_dbg_leave(hdmirx_dev);
+	return ret;
+}
+
 static int hdmirx_ctrl_open(struct inode *inode, struct file *file)
 {
 	return single_open(file, hdmirx_ctrl_show, inode->i_private);
 }
 
 static ssize_t
-hdmirx_ctrl_write(struct file *file, const char __user *buf,
+hdmirx_ctrl_write_locked(struct file *file, const char __user *buf,
 		  size_t count, loff_t *ppos)
 {
 	struct rk_hdmirx_dev *hdmirx_dev =
@@ -2037,7 +2166,7 @@ static const struct file_operations hdmirx_ctrl_fops = {
 	.release = single_release,
 };
 
-static int hdmirx_phy_show(struct seq_file *s, void *v)
+static int hdmirx_phy_show_locked(struct seq_file *s, void *v)
 {
 	struct rk_hdmirx_dev *hdmirx_dev = s->private;
 	u32 i = 0, val = 0;
@@ -2081,13 +2210,37 @@ static int hdmirx_phy_show(struct seq_file *s, void *v)
 	return 0;
 }
 
+static int hdmirx_phy_show(struct seq_file *s, void *v)
+{
+	struct rk_hdmirx_dev *hdmirx_dev = s->private;
+	int ret = hdmirx_dbg_enter(hdmirx_dev);
+
+	if (ret)
+		return ret;
+	ret = hdmirx_phy_show_locked(s, v);
+	hdmirx_dbg_leave(hdmirx_dev);
+	return ret;
+}
+
+static ssize_t hdmirx_phy_write(struct file *file, const char __user *buf, size_t count, loff_t *ppos)
+{
+	struct rk_hdmirx_dev *hdmirx_dev = ((struct seq_file *)file->private_data)->private;
+	ssize_t ret = hdmirx_dbg_enter(hdmirx_dev);
+
+	if (ret)
+		return ret;
+	ret = hdmirx_phy_write_locked(file, buf, count, ppos);
+	hdmirx_dbg_leave(hdmirx_dev);
+	return ret;
+}
+
 static int hdmirx_phy_open(struct inode *inode, struct file *file)
 {
 	return single_open(file, hdmirx_phy_show, inode->i_private);
 }
 
 static ssize_t
-hdmirx_phy_write(struct file *file, const char __user *buf,
+hdmirx_phy_write_locked(struct file *file, const char __user *buf,
 		 size_t count, loff_t *ppos)
 {
 	struct rk_hdmirx_dev *hdmirx_dev =
@@ -2121,7 +2274,7 @@ static const struct file_operations hdmirx_phy_fops = {
 	.release = single_release,
 };
 
-static int hdmirx_status_show(struct seq_file *s, void *v)
+static int hdmirx_status_show_locked(struct seq_file *s, void *v)
 {
 	struct rk_hdmirx_dev *hdmirx_dev = s->private;
 	struct v4l2_dv_timings timings = hdmirx_dev->timings;
@@ -2225,13 +2378,11 @@ static int hdmirx_status_show(struct seq_file *s, void *v)
 	seq_printf(s, "Pixel Clk: %llu\n", bt->pixelclock);
 	seq_printf(s, "Mode: %s\n", hdmirx_dev->is_dvi_mode ? "DVI" : "HDMI");
 
-	hdmirx_get_colordepth(hdmirx_dev);
+	/* what the driver holds: re-reading here (it did) changed the state the
+	 * pkt_0 comparison works against */
 	seq_printf(s, "Color Depth: %u bit", hdmirx_dev->color_depth / 3);
 	seq_puts(s, "\n");
 
-	/* colorspace before range: sYCC/AdobeYCC/AdobeRGB imply full range */
-	hdmirx_get_color_space(hdmirx_dev);
-	hdmirx_get_color_range(hdmirx_dev);
 	seq_puts(s, "Color Range: ");
 	if (hdmirx_dev->cur_color_range == HDMIRX_DEFAULT_RANGE)
 		seq_puts(s, "DEFAULT\n");
@@ -2247,6 +2398,18 @@ static int hdmirx_status_show(struct seq_file *s, void *v)
 		seq_puts(s, "Unknown\n");
 
 	return 0;
+}
+
+static int hdmirx_status_show(struct seq_file *s, void *v)
+{
+	struct rk_hdmirx_dev *hdmirx_dev = s->private;
+	int ret = hdmirx_dbg_enter(hdmirx_dev);
+
+	if (ret)
+		return ret;
+	ret = hdmirx_status_show_locked(s, v);
+	hdmirx_dbg_leave(hdmirx_dev);
+	return ret;
 }
 
 static int hdmirx_status_open(struct inode *inode, struct file *file)
@@ -2499,7 +2662,7 @@ static int hdmirx_probe(struct platform_device *pdev)
 
 	irq_set_affinity_hint(irq, cpumask_of(hdmirx_dev->bound_cpu));
 	hdmirx_dev->dma_irq = irq;
-	ret = devm_request_threaded_irq(dev, irq, NULL, hdmirx_dma_irq_handler, IRQF_ONESHOT, RK_HDMIRX_DRVNAME"-dma", hdmirx_dev);
+	ret = devm_request_threaded_irq(dev, irq, hdmirx_dma_hardirq, hdmirx_dma_irq_handler, IRQF_ONESHOT, RK_HDMIRX_DRVNAME"-dma", hdmirx_dev);
 	if (ret) {
 		dev_err(dev, "request dma irq thread failed! ret:%d\n", ret);
 		goto err_work_queues;
@@ -2617,7 +2780,7 @@ static int hdmirx_probe(struct platform_device *pdev)
 		cec_data.edid = edid_init_data_340M;
 		hdmirx_dev->cec = rk_hdmirx_cec_register(&cec_data);
 		if (hdmirx_dev->cec && hdmirx_dev->cec->adap)
-			schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+			hdmirx_queue_dwork(hdmirx_dev,
 					 &hdmirx_dev->delayed_work_cec,
 					 msecs_to_jiffies(4000));
 	}
@@ -2657,21 +2820,27 @@ static int hdmirx_remove(struct platform_device *pdev)
 	struct rk_hdmirx_dev *hdmirx_dev = dev_get_drvdata(dev);
 
 	debugfs_remove_recursive(hdmirx_dev->debugfs_dir);
-	cpu_latency_qos_remove_request(&hdmirx_dev->pm_qos);
 
 	/*
-	 * Stop the interrupt sources before tearing anything down, then wait
-	 * for any in-flight work to finish so it cannot touch registers after
-	 * the clocks are gated below.
+	 * No work may be queued from here on (hdmirx_queue_dwork checks this),
+	 * and a running lock wait gives up. Works re-queue each other (signal
+	 * check -> res_change -> hotplug), so they are cancelled in that order,
+	 * hotplug twice, before the interrupts that queue them go too.
 	 */
+	mutex_lock(&hdmirx_dev->work_lock);
+	WRITE_ONCE(hdmirx_dev->shutdown, true);
+	mutex_unlock(&hdmirx_dev->work_lock);
+	WRITE_ONCE(hdmirx_dev->abort_lock_wait, true);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_signal_check);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
+
 	disable_irq(hdmirx_dev->hdmi_irq);
 	disable_irq(hdmirx_dev->dma_irq);
 	disable_irq(hdmirx_dev->det_irq);
 	sip_fiq_control(RK_SIP_FIQ_CTRL_FIQ_DIS, RK_IRQ_HDMIRX_HDMI, 0);
 
-	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
-	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
-	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_signal_check);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_audio);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_heartbeat);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_cec);
@@ -2686,12 +2855,9 @@ static int hdmirx_remove(struct platform_device *pdev)
 	irq_set_affinity_hint(hdmirx_dev->dma_irq, NULL);
 	irq_set_affinity_hint(hdmirx_dev->det_irq, NULL);
 
-	clk_bulk_disable_unprepare(hdmirx_dev->num_clks, hdmirx_dev->clks);
-	reset_control_assert(hdmirx_dev->rst_a);
-	reset_control_assert(hdmirx_dev->rst_p);
-	reset_control_assert(hdmirx_dev->rst_ref);
-	reset_control_assert(hdmirx_dev->rst_biu);
-
+	/* while the registers are still clocked: the video device (a close
+	 * after this stops streaming on live registers), CEC (its disable
+	 * writes CEC_INT_MASK_N), HDCP */
 	if (hdmirx_dev->cec)
 		rk_hdmirx_cec_unregister(hdmirx_dev->cec);
 	if (hdmirx_dev->cec_notifier)
@@ -2703,9 +2869,16 @@ static int hdmirx_remove(struct platform_device *pdev)
 	v4l2_ctrl_handler_free(&hdmirx_dev->hdl);
 	v4l2_device_unregister(&hdmirx_dev->v4l2_dev);
 
+	/* the runtime suspend gates the clocks (gating them here as well
+	 * unprepared them twice) and drops the QoS floors */
 	if (hdmirx_dev->power_on)
 		pm_runtime_put_sync(dev);
 	pm_runtime_disable(dev);
+	reset_control_assert(hdmirx_dev->rst_a);
+	reset_control_assert(hdmirx_dev->rst_p);
+	reset_control_assert(hdmirx_dev->rst_ref);
+	reset_control_assert(hdmirx_dev->rst_biu);
+	cpu_latency_qos_remove_request(&hdmirx_dev->pm_qos);
 	of_reserved_mem_device_release(dev);
 
 	return 0;

@@ -243,7 +243,6 @@ static void hdmirx_vb_done(struct hdmirx_stream *stream,
 	for (i = 0; i < fmt->mplanes; ++i)
 		vb2_set_plane_payload(&vb_done->vb2_buf, i, stream->pixm.plane_fmt[i].sizeimage);
 
-	vb_done->vb2_buf.timestamp = ktime_get_ns();
 	vb2_buffer_done(&vb_done->vb2_buf, VB2_BUF_STATE_DONE);
 	v4l2_dbg(4, debug, v4l2_dev, "vb_done fd:%d", vb_done->vb2_buf.planes[0].m.fd);
 }
@@ -262,12 +261,15 @@ static void dma_idle_int_handler(struct rk_hdmirx_dev *hdmirx_dev, bool *handled
 
 	if (!stream->next_buf) {
 		dev_info_ratelimited(hdmirx_dev->dev, "%s: dma idle with no next_buf\n", __func__);
+		/* that frame is lost: the next one's sequence shows the gap */
+		stream->frame_idx++;
 		goto DMA_IDLE_OUT;
 	}
 
 	if (stream->curr_buf) {
 		vb_done = &stream->curr_buf->vb;
-		vb_done->vb2_buf.timestamp = ktime_get_ns();
+		/* the hard IRQ's time, not this thread's: no scheduling delay in it */
+		vb_done->vb2_buf.timestamp = READ_ONCE(stream->irq_ts) ?: ktime_get_ns();
 		vb_done->sequence = stream->frame_idx;
 		/* config userbits 0 or 0xffffffff as invalid fence_fd*/
 		memset(vb_done->timecode.userbits, 0xff, sizeof(vb_done->timecode.userbits));
@@ -376,6 +378,15 @@ LINE_FLAG_OUT:
 	*handled = true;
 }
 
+/* the DMA IRQ's hard half: when it fired, then the thread does the rest */
+irqreturn_t hdmirx_dma_hardirq(int irq, void *dev_id)
+{
+	struct rk_hdmirx_dev *hdmirx_dev = dev_id;
+
+	WRITE_ONCE(hdmirx_dev->stream.irq_ts, ktime_get_ns());
+	return IRQ_WAKE_THREAD;
+}
+
 irqreturn_t hdmirx_dma_irq_handler(int irq, void *dev_id)
 {
 	struct rk_hdmirx_dev *hdmirx_dev = dev_id;
@@ -429,6 +440,8 @@ static int hdmirx_dqbuf(struct file *file, void *priv, struct v4l2_buffer *p)
 	return ret;
 }
 
+static void hdmirx_set_fmt(struct hdmirx_stream *stream, struct v4l2_pix_format_mplane *pixm, bool try);
+
 static int hdmirx_queue_setup(struct vb2_queue *queue,
 			     unsigned int *num_buffers,
 			     unsigned int *num_planes,
@@ -440,7 +453,7 @@ static int hdmirx_queue_setup(struct vb2_queue *queue,
 	const struct v4l2_pix_format_mplane *pixm = NULL;
 	const struct hdmirx_output_fmt *out_fmt;
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
-	u32 i, height;
+	u32 i;
 
 	pixm = &stream->pixm;
 	out_fmt = stream->out_fmt;
@@ -450,16 +463,27 @@ static int hdmirx_queue_setup(struct vb2_queue *queue,
 		return -EINVAL;
 	}
 
-	*num_planes = out_fmt->mplanes;
-	height = pixm->height;
+	/* no buffers yet: size them for the signal now, not for the format a
+	 * G/S_FMT set before a signal change (the DMA writes what arrives) */
+	if (!vb2_is_busy(queue) && hdmirx_dev->timings.bt.width && hdmirx_dev->timings.bt.height) {
+		struct v4l2_pix_format_mplane now = { .pixelformat = hdmirx_dev->cur_fmt_fourcc };
 
-	for (i = 0; i < out_fmt->mplanes; i++) {
-		const struct v4l2_plane_pix_format *plane_fmt;
-		int h = height;
-
-		plane_fmt = &pixm->plane_fmt[i];
-		sizes[i] = plane_fmt->sizeimage / height * h;
+		hdmirx_set_fmt(stream, &now, false);
+		out_fmt = stream->out_fmt;
 	}
+
+	if (*num_planes) {   /* CREATE_BUFS: its sizes, checked */
+		if (*num_planes != out_fmt->mplanes)
+			return -EINVAL;
+		for (i = 0; i < out_fmt->mplanes; i++)
+			if (sizes[i] < pixm->plane_fmt[i].sizeimage)
+				return -EINVAL;
+		return 0;
+	}
+	*num_planes = out_fmt->mplanes;
+
+	for (i = 0; i < out_fmt->mplanes; i++)
+		sizes[i] = pixm->plane_fmt[i].sizeimage;
 
 	v4l2_dbg(1, debug, v4l2_dev, "%s count %d, size %d\n", v4l2_type_names[queue->type], *num_buffers, sizes[0]);
 
@@ -531,7 +555,6 @@ static void hdmirx_buf_queue(struct vb2_buffer *vb)
 	spin_unlock_irqrestore(&stream->vbq_lock, lock_flags);
 }
 
-static void hdmirx_set_fmt(struct hdmirx_stream *stream, struct v4l2_pix_format_mplane *pixm, bool try);
 
 /*
  * A buffer too small for what the DMA writes now is refused: the DMA takes
@@ -545,6 +568,13 @@ static int hdmirx_buf_prepare(struct vb2_buffer *vb)
 	struct v4l2_pix_format_mplane need = { .pixelformat = hdmirx_dev->cur_fmt_fourcc };
 	unsigned int i;
 
+	/* the DMA takes 32-bit addresses (buff_addr is u32): a buffer above
+	 * 4 GiB would be written at its truncated address */
+	for (i = 0; i < vb->num_planes; i++)
+		if (upper_32_bits(vb2_dma_contig_plane_dma_addr(vb, i) + vb2_plane_size(vb, i) - 1)) {
+			dev_err_ratelimited(hdmirx_dev->dev, "%s: plane %u above 4 GiB\n", __func__, i);
+			return -EINVAL;
+		}
 	if (!hdmirx_dev->timings.bt.width || !hdmirx_dev->timings.bt.height)
 		return 0;
 	hdmirx_set_fmt(stream, &need, true);
@@ -838,7 +868,7 @@ static void hdmirx_set_fmt(struct hdmirx_stream *stream, struct v4l2_pix_format_
 	} else {
 		switch (hdmirx_dev->cur_color_space) {
 		case HDMIRX_XVYCC601:
-			pixm->colorspace = V4L2_COLORSPACE_DEFAULT;
+			pixm->colorspace = V4L2_COLORSPACE_SMPTE170M;
 			pixm->ycbcr_enc = V4L2_YCBCR_ENC_XV601;
 			break;
 		case HDMIRX_XVYCC709:
@@ -846,11 +876,11 @@ static void hdmirx_set_fmt(struct hdmirx_stream *stream, struct v4l2_pix_format_
 			pixm->ycbcr_enc = V4L2_YCBCR_ENC_XV709;
 			break;
 		case HDMIRX_SYCC601:
-			pixm->colorspace = V4L2_COLORSPACE_DEFAULT;
+			pixm->colorspace = V4L2_COLORSPACE_SRGB;
 			pixm->ycbcr_enc = V4L2_YCBCR_ENC_601;
 			break;
 		case HDMIRX_ADOBE_YCC601:
-			pixm->colorspace = V4L2_COLORSPACE_DEFAULT;
+			pixm->colorspace = V4L2_COLORSPACE_OPRGB;
 			pixm->ycbcr_enc = V4L2_YCBCR_ENC_601;
 			break;
 		case HDMIRX_BT2020_YCC_CONST_LUM:
@@ -1092,7 +1122,6 @@ static int hdmirx_enum_dv_timings(struct file *file, void *_fh,
 
 static int hdmirx_query_dv_timings(struct file *file, void *_fh, struct v4l2_dv_timings *timings)
 {
-	int ret;
 	struct hdmirx_stream *stream = video_drvdata(file);
 	struct rk_hdmirx_dev *hdmirx_dev = stream->hdmirx_dev;
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
@@ -1107,9 +1136,15 @@ static int hdmirx_query_dv_timings(struct file *file, void *_fh, struct v4l2_dv_
 		return -ENOLCK;
 	}
 
-	ret = hdmirx_get_detected_timings(hdmirx_dev, timings, false, false);   /* an ioctl: no retry sleeps under vlock */
-	if (ret)
-		return ret;
+	/*
+	 * The timings the driver latched when it locked (hdmirx_format_change),
+	 * and nothing re-derived: detecting here rewrote the format, depth and
+	 * colour state under a running capture, and a later InfoFrame change
+	 * compared against that and went unnoticed.
+	 */
+	if (!hdmirx_dev->get_timing)
+		return -ENOLCK;
+	*timings = hdmirx_dev->timings;
 
 	if (debug)
 		v4l2_print_dv_timings(hdmirx_dev->v4l2_dev.name, "query_dv_timings: ", timings, false);
@@ -1484,6 +1519,22 @@ void hdmirx_get_color_range(struct rk_hdmirx_dev *hdmirx_dev)
 		(hdmirx_dev->cur_color_range == HDMIRX_FULL_RANGE ? "full" : "limit"));
 }
 
+/*
+ * The frame the receiver measures now is not the one latched: a mode change
+ * the lock test cannot see (same TMDS clock). Only geometry; hdmirx_get_timings
+ * stores the fps it computes, which is put back.
+ */
+bool hdmirx_geometry_changed(struct rk_hdmirx_dev *hdmirx_dev)
+{
+	const struct v4l2_bt_timings *cur = &hdmirx_dev->timings.bt;
+	struct v4l2_bt_timings now = { .pixelclock = cur->pixelclock };
+	const u32 fps = hdmirx_dev->fps;
+
+	hdmirx_get_timings(hdmirx_dev, &now, false);
+	hdmirx_dev->fps = fps;
+	return now.width != cur->width || now.height != cur->height || now.interlaced != cur->interlaced;
+}
+
 static int hdmirx_get_detected_timings(struct rk_hdmirx_dev *hdmirx_dev, struct v4l2_dv_timings *timings, bool from_dma, bool can_sleep)
 {
 	struct v4l2_device *v4l2_dev = &hdmirx_dev->v4l2_dev;
@@ -1597,7 +1648,7 @@ void hdmirx_format_change(struct rk_hdmirx_dev *hdmirx_dev)
 	};
 
 	if (hdmirx_try_to_get_timings(hdmirx_dev, &timings, 20)) {
-		schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+		hdmirx_queue_dwork(hdmirx_dev,
 				&hdmirx_dev->delayed_work_hotplug,
 				msecs_to_jiffies(1000));
 		return;
@@ -1681,34 +1732,44 @@ static int hdmirx_set_edid(struct file *file, void *fh,
 {
 	struct hdmirx_stream *stream = video_drvdata(file);
 	struct rk_hdmirx_dev *hdmirx_dev = stream->hdmirx_dev;
-
-	disable_irq(hdmirx_dev->hdmi_irq);
-	disable_irq(hdmirx_dev->dma_irq);
-	sip_fiq_control(RK_SIP_FIQ_CTRL_FIQ_DIS, RK_IRQ_HDMIRX_HDMI, 0);
+	int ret;
 
 	/*
 	 * Flush any in-flight plug/res-change worker (they take work_lock)
 	 * before reconfiguring, then hold work_lock so the plugout/EDID
-	 * rewrite cannot race a worker re-arming the PHY.
+	 * rewrite cannot race a worker re-arming the PHY. This runs under
+	 * vlock, which the capture's poll takes: a lock wait in flight is told
+	 * to give up instead of being waited out (seconds), and the works go
+	 * before the IRQs they wait on.
 	 */
+	WRITE_ONCE(hdmirx_dev->abort_lock_wait, true);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_signal_check);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
+	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
+
+	disable_irq(hdmirx_dev->hdmi_irq);
+	disable_irq(hdmirx_dev->dma_irq);
+	sip_fiq_control(RK_SIP_FIQ_CTRL_FIQ_DIS, RK_IRQ_HDMIRX_HDMI, 0);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_hotplug);
 	cancel_delayed_work_sync(&hdmirx_dev->delayed_work_res_change);
+	WRITE_ONCE(hdmirx_dev->abort_lock_wait, false);
 
 	mutex_lock(&hdmirx_dev->work_lock);
 	if (tx_5v_power_present(hdmirx_dev))
 		hdmirx_plugout(hdmirx_dev);
-	hdmirx_write_edid(hdmirx_dev, edid, false);
-	hdmirx_dev->edid_version = HDMIRX_EDID_USER;
+	ret = hdmirx_write_edid(hdmirx_dev, edid, false);
+	if (!ret)
+		hdmirx_dev->edid_version = HDMIRX_EDID_USER;
 	mutex_unlock(&hdmirx_dev->work_lock);
 
 	enable_irq(hdmirx_dev->hdmi_irq);
 	enable_irq(hdmirx_dev->dma_irq);
 	sip_fiq_control(RK_SIP_FIQ_CTRL_FIQ_EN, RK_IRQ_HDMIRX_HDMI, 0);
-	schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+	hdmirx_queue_dwork(hdmirx_dev,
 				 &hdmirx_dev->delayed_work_hotplug,
 				 msecs_to_jiffies(1000));
 
-	return 0;
+	return ret;
 }
 
 static int
@@ -1761,7 +1822,7 @@ static long hdmirx_ioctl_default(struct file *file, void *fh,
 	// 	break;
 	// case RK_HDMIRX_CMD_SOFT_RESET:
 	// 	hdmirx_reset_all(hdmirx_dev);
-	// 	schedule_delayed_work_on(hdmirx_dev->bound_cpu,
+	// 	hdmirx_queue_dwork(hdmirx_dev,
 	// 				 &hdmirx_dev->delayed_work_hotplug,
 	// 				 msecs_to_jiffies(1000));
 	// 	break;
